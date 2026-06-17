@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 새벽 cron 작업들이 오늘 모두 정상 완료됐는지 점검하고 텔레그램으로 요약 1건 발송.
-# 마지막 작업(pull-repos 06:00) 이후에 돌도록 cron 등록 (예: 30 6 * * *).
+# 마지막 작업(.md sync 06:30) 이후에 돌도록 cron 등록 (예: 0 7 * * *).
 # 전부 정상이면 ✅, 하나라도 미완료/실패면 ⚠️ 로 매일 1통 보낸다(데일리 하트비트).
 set -u
 
@@ -41,6 +41,23 @@ if echo "$pull_block" | head -1 | grep -q "$TODAY"; then
   fi
 else
   lines="${lines}❌ git pull (오늘 실행 기록 없음)"$'\n'
+  ok_all=0
+fi
+
+# .md sync(sync-devdocs): 로그의 마지막 실행 블록이 오늘이고 완료 라인이 있으면 성공
+SYNC_LOG="/home/jikhanjung/scripts/sync-devdocs.log"
+sync_block=$(tac "$SYNC_LOG" 2>/dev/null | awk '/^===== sync-devdocs /{print; exit} {print}' | tac)
+if echo "$sync_block" | head -1 | grep -q "$TODAY"; then
+  if echo "$sync_block" | grep -q '^==== synced '; then
+    sdirs=$(echo "$sync_block" | sed -n 's/^==== synced \([0-9]*\) source dirs.*/\1/p')
+    stot=$(echo "$sync_block" | sed -n 's/^Total md in raw\/: \([0-9]*\).*/\1/p')
+    lines="${lines}✅ .md sync (${sdirs}개 디렉토리, ${stot} md)"$'\n'
+  else
+    lines="${lines}❌ .md sync (완료 기록 없음)"$'\n'
+    ok_all=0
+  fi
+else
+  lines="${lines}❌ .md sync (오늘 실행 기록 없음)"$'\n'
   ok_all=0
 fi
 
