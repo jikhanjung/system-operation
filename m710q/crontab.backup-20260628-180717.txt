@@ -1,0 +1,35 @@
+# Edit this file to introduce tasks to be run by cron.
+# 
+# Each task to run has to be defined through a single line
+# indicating with different fields when the task will be run
+# and what command to run for the task
+# 
+# To define the time you can provide concrete values for
+# minute (m), hour (h), day of month (dom), month (mon),
+# and day of week (dow) or use '*' in these fields (for 'any').
+# 
+# Notice that tasks will be started based on the cron's system
+# daemon's notion of time and timezones.
+# 
+# Output of the crontab jobs (including errors) is sent through
+# email to the user the crontab file belongs to (unless redirected).
+# 
+# For example, you can run a backup of all your user accounts
+# at 5 a.m every week with:
+# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
+# 
+# For more information see the manual pages of crontab(5) and cron(8)
+# 
+# m h  dom mon dow   command
+0 1 * * * /home/jikhanjung/scripts/database_backup.sh
+0 3 * * * /home/jikhanjung/scripts/backup-fsis.sh
+# 네이버 부동산 토지 매물 크롤링 (매주 월요일 02:00)
+0 2 * * * cd /srv/naverland && /home/jikhanjung/venv/naverland/bin/python naver_land_tracker.py >> /tmp/naver_crawler.log 2>&1
+30 3 * * * /home/jikhanjung/scripts/backup-ghdb.sh
+0 5 * * * /home/jikhanjung/scripts/backup-fcmanager.sh
+# ~/projects 밑 모든 git repo 매일 06:00 pull (--ff-only)
+0 6 * * * /home/jikhanjung/scripts/pull-repos.sh
+# repo pull 후 sync→ingest(claude -p)→commit/push 파이프라인 (06:30) — 내부에서 sync-devdocs.sh 호출
+30 6 * * * /home/jikhanjung/projects/devdocs/nightly-ingest.sh >> /home/jikhanjung/scripts/nightly-ingest.log 2>&1
+# 새벽 작업 요약 알림 (07:00, .md sync 이후)
+0 7 * * * /home/jikhanjung/scripts/morning-summary.sh
