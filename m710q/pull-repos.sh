@@ -51,6 +51,12 @@ failures=""   # 실패한 repo 모음 (알림용)
       continue
     fi
 
+    # 커밋이 하나도 없는 빈 레포는 건너뜀 (pull 할 ref 자체가 없어 --ff-only 실패)
+    if ! git -C "$dir" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+      echo "[SKIP] $name (커밋 없음 - 빈 레포)"
+      continue
+    fi
+
     before=$(git -C "$dir" rev-parse --short HEAD)
     if out=$(git -C "$dir" pull --ff-only 2>&1); then
       after=$(git -C "$dir" rev-parse --short HEAD)
