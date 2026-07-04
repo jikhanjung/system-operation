@@ -24,11 +24,22 @@ system-operation/
 | `database_backup.sh` | `0 1 * * *` | dolfinserver DB 백업 (로컬 + NAS, 계층형 보관) |
 | `backup-fsis.sh`     | `0 3 * * *` | fsis2026 백업 (운영서버 pull → 로컬 + NAS) |
 | `backup-ghdb.sh`     | `30 3 * * *` | GHDB 백업 |
-| `backup-fcsky.sh`    | `0 4 * * *` | FcSky 백업 |
 | `backup-fcmanager.sh`| `0 5 * * *` | fcmanager 백업 |
 | `pull-repos.sh`      | `0 6 * * *` | `~/projects` 밑 모든 git repo 를 `--ff-only` pull |
-| `morning-summary.sh` | `30 6 * * *` | 새벽 작업 결과를 점검해 텔레그램 요약 1통 발송 |
+| `morning-summary.sh` | `30 7 * * *` | 새벽 작업 결과를 점검해 텔레그램 요약 1통 발송 |
 | `notify-telegram.sh` | (헬퍼) | 공용 텔레그램 전송기. 다른 스크립트가 호출 |
+
+폐기된 스크립트는 `_retired/` 에 보관한다
+(예: `backup-fcsky.sh` — FcSky→fcmanager 이관으로 2026-06-22 폐기).
+
+### repo 밖 크론 작업
+
+crontab 에는 이 repo 밖의 스크립트도 등록되어 있으며, `morning-summary.sh` 가 함께 점검한다:
+
+| cron | 스크립트 | 설명 |
+|------|----------|------|
+| `0 4 * * *`  | `~/projects/cdGTS/scripts/sync-cdgts-db.sh` | cdGTS 운영 DB → 개발/테스트 DB sync (로그: `~/backups/cdGTS/sync.log`) |
+| `30 6 * * *` | `~/projects/devdocs/nightly-ingest.sh` | .md sync → ingest(claude -p) → commit/push 파이프라인 (로그: `m710q/nightly-ingest.log`) |
 
 ### 알림 (Telegram)
 
