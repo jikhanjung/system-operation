@@ -22,7 +22,7 @@ system-operation/
 | 파일 | cron | 설명 |
 |------|------|------|
 | `database_backup.sh` | `0 1 * * *` | dolfinserver DB 백업 (로컬 + NAS, 계층형 보관) |
-| `backup-fsis.sh`     | `0 3 * * *` | fsis2026 백업 (운영서버 pull → 로컬 + NAS) |
+| `backup-fsis.sh`     | `5 3 * * *` | fsis2026 백업 (운영서버 online-backup pull → 로컬 + NAS + 테스트 컨테이너 갱신) |
 | `backup-ghdb.sh`     | `30 3 * * *` | GHDB 백업 |
 | `backup-fcmanager.sh`| `0 5 * * *` | fcmanager 백업 |
 | `pull-repos.sh`      | `0 6 * * *` | `~/projects` 밑 모든 git repo 를 `--ff-only` pull |
@@ -57,6 +57,15 @@ crontab 에는 이 repo 밖의 스크립트도 등록되어 있으며, `morning-
 
 - 백업 스크립트의 NAS 접근은 모두 `timeout 10` 으로 감싸,
   NAS 가 죽어 있어도(언마운트/stale 마운트) 무한 대기 없이 건너뛴다.
+- **DB 스냅샷은 일관(consistent) 단일파일 원칙** — 라이브 `db.sqlite3` 를 raw 로 긁으면
+  WAL 미커밋 꼬리(torn-copy) 위험이 있어, 운영 측이 만드는 온라인 백업본을 당긴다:
+  - `backup-fsis.sh` 는 kofhin 이 매시(`:00`) 생성하는 `backup/fsis_*.sqlite3` 최신본을 pull
+    (그래서 cron 이 `:05` 실행). 일관 스냅샷엔 `-wal`/`-shm` 이 없으므로
+    보관처(current·NAS)의 낡은 형제파일은 **복사가 아니라 제거**해 신선 DB 옆 stale WAL 손상을 막는다.
+  - `backup-fcmanager.sh` 는 디렉터리 마운트 전환(0.6.16)에 맞춰 정본을 `db/db.sqlite3` 에서 받고,
+    구 레이아웃(`db.sqlite3`)은 fallback 으로만 남긴다.
+- `backup-fsis.sh` 는 백업 후 로컬 테스트 컨테이너(`fsis`)의 바인드-마운트 DB 도 갱신한다
+  — 가동 중 파일 교체 금지(dual-writer)라 **정지 → 복사 → 재시작** 순서로, 원래 돌던 경우에만 재시작.
 - `pull-repos.sh` 로그는 512KB 초과 시 `pull-repos-YYYY-MM.log` 로 월별 보관,
   3개월 지난 월 파일은 자동 `gzip` 압축.
 - 로그 파일(`*.log`, `*.log.*`)은 `.gitignore` 로 추적 제외.
