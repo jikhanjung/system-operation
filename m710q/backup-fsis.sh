@@ -30,7 +30,8 @@ LOCAL_DAILY_DAYS=30
 NAS_DAILY_DAYS=90
 
 # kofhin /srv/fsis2026/backup/ 에서 pull 할 tar.gz 트랙 (devlog 134)
-TAR_TRACKS=( fsis_data kofhin_nginx )
+# fsis_data 트랙은 devlog 165 (Phase 4 cleanup 5) 에서 폐지 — 분류 파이프라인 per-file 전환
+TAR_TRACKS=( kofhin_nginx )
 
 # --- 초기화 ---
 mkdir -p "${DB_HISTORY_DIR}" "${TAR_HISTORY_DIR}" "${CURRENT_DIR}"
@@ -108,14 +109,15 @@ log "========== 백업 시작 =========="
 TODAY=$(date +%Y%m%d)
 DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
 
-log "DB 스냅샷 복사 중..."
-if scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3" "${DB_SNAPSHOT}"; then
-    # WAL 모드 부속 파일도 함께 복사
-    scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3-wal" "${DB_SNAPSHOT}-wal" 2>/dev/null || true
-    scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3-shm" "${DB_SNAPSHOT}-shm" 2>/dev/null || true
-    log "DB 스냅샷 완료: ${DB_SNAPSHOT} (+wal/shm)"
+# 2026-07-14: 라이브 db.sqlite3 raw scp(torn 위험) 대신 kofhin 이 매시(:00) 만드는
+# online-backup 최신본(backup/fsis_*.sqlite3, 트랜잭션 일관·단일파일)을 당긴다. wal/shm 불필요.
+# cron 은 :05 실행이라 그 시각엔 당시각 스냅샷이 완성돼 있음.
+log "DB 스냅샷 복사 중 (kofhin online-backup 최신본)..."
+LATEST_DB=$(ssh -q "${REMOTE}" "ls -1t ${REMOTE_PATH}/backup/fsis_*.sqlite3 2>/dev/null | head -1")
+if [ -n "${LATEST_DB}" ] && scp -q "${REMOTE}:${LATEST_DB}" "${DB_SNAPSHOT}"; then
+    log "DB 스냅샷 완료: ${DB_SNAPSHOT} ← ${LATEST_DB##*/} (online-backup, 일관)"
 else
-    log "ERROR: DB 스냅샷 실패"
+    log "ERROR: DB 스냅샷 실패 (kofhin backup/fsis_*.sqlite3 없음? cron 미실행?)"
     exit 1
 fi
 
@@ -172,9 +174,9 @@ scp -q "${REMOTE}:${REMOTE_PATH}/.env" "${CURRENT_DIR}/.env" 2>/dev/null && \
 
 # --- 4. 현재 DB도 current/에 동기화 ---
 cp "${DB_SNAPSHOT}" "${CURRENT_DIR}/db.sqlite3"
-cp -f "${DB_SNAPSHOT}-wal" "${CURRENT_DIR}/db.sqlite3-wal" 2>/dev/null || true
-cp -f "${DB_SNAPSHOT}-shm" "${CURRENT_DIR}/db.sqlite3-shm" 2>/dev/null || true
-log "current/db.sqlite3 동기화 완료 (+wal/shm)"
+# 일관 스냅샷엔 wal/shm 이 없다 — 과거 raw-copy 시절의 stale 형제파일 제거(신선 DB 옆 낡은 WAL = 손상 위험)
+rm -f "${CURRENT_DIR}/db.sqlite3-wal" "${CURRENT_DIR}/db.sqlite3-shm"
+log "current/db.sqlite3 동기화 완료 (일관 스냅샷)"
 
 # --- 5. NAS 백업 ---
 if timeout 10 test -d "${NAS_DIR}"; then
@@ -184,9 +186,8 @@ if timeout 10 test -d "${NAS_DIR}"; then
 
     # NAS DB 스냅샷
     cp "${DB_SNAPSHOT}" "${NAS_DB_DIR}/db_${TODAY}.sqlite3"
-    cp -f "${DB_SNAPSHOT}-wal" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-wal" 2>/dev/null || true
-    cp -f "${DB_SNAPSHOT}-shm" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-shm" 2>/dev/null || true
-    log "NAS DB 스냅샷 완료 (+wal/shm)"
+    rm -f "${NAS_DB_DIR}/db_${TODAY}.sqlite3-wal" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-shm"
+    log "NAS DB 스냅샷 완료 (일관 스냅샷)"
 
     # NAS uploads 미러링
     rsync -az --no-group --delete "${CURRENT_DIR}/uploads/" "${NAS_CURRENT}/uploads/" >> "${LOG_FILE}" 2>&1
@@ -195,8 +196,7 @@ if timeout 10 test -d "${NAS_DIR}"; then
     # NAS .env
     [ -f "${CURRENT_DIR}/.env" ] && cp "${CURRENT_DIR}/.env" "${NAS_CURRENT}/.env"
     cp "${DB_SNAPSHOT}" "${NAS_CURRENT}/db.sqlite3"
-    cp -f "${DB_SNAPSHOT}-wal" "${NAS_CURRENT}/db.sqlite3-wal" 2>/dev/null || true
-    cp -f "${DB_SNAPSHOT}-shm" "${NAS_CURRENT}/db.sqlite3-shm" 2>/dev/null || true
+    rm -f "${NAS_CURRENT}/db.sqlite3-wal" "${NAS_CURRENT}/db.sqlite3-shm"
 
     # NAS DB 정리 (N일 초과 → 월초만 보관, 12/01 영구)
     NAS_DEL=$(cleanup_fsis_db "${NAS_DB_DIR}" ${NAS_DAILY_DAYS})
@@ -343,6 +343,50 @@ if [ -d "${DEV_DATA_DIR}" ]; then
     log "dev_data 동기화 완료: ${DEV_DATA_DIR} (DB+uploads+data)"
 else
     log "WARN: dev_data 디렉토리 없음 (${DEV_DATA_DIR}) — 개발 환경 동기화 건너뜀"
+fi
+
+# --- 7.5. 테스트 서버(로컬 fsis 컨테이너) DB 갱신 ---
+# 테스트 컨테이너는 m710q 의 /srv/fsis2026/db.sqlite3 를 바인드 마운트 (deploy-dev).
+# 컨테이너 가동 중 파일 교체 금지 (dual-writer, devlog 074) → 정지 → 복사 → 재시작.
+TEST_DB_DIR="/srv/fsis2026"
+TEST_CONTAINER="fsis"
+if [ -f "${TEST_DB_DIR}/db.sqlite3" ]; then
+    TEST_WAS_RUNNING=0
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${TEST_CONTAINER}"; then
+        if docker stop "${TEST_CONTAINER}" >/dev/null 2>&1; then
+            TEST_WAS_RUNNING=1
+        else
+            TEST_WAS_RUNNING=-1
+            log "WARN: 테스트 컨테이너(${TEST_CONTAINER}) 정지 실패 — 테스트 DB 갱신 건너뜀"
+        fi
+    fi
+    if [ "${TEST_WAS_RUNNING}" -ge 0 ]; then
+        if cp -f "${CURRENT_DIR}/db.sqlite3" "${TEST_DB_DIR}/db.sqlite3"; then
+            # WAL/SHM 은 스냅샷 쌍으로 맞춤 (prod 에 없으면 테스트 쪽도 제거)
+            if [ -f "${CURRENT_DIR}/db.sqlite3-wal" ]; then
+                cp -f "${CURRENT_DIR}/db.sqlite3-wal" "${TEST_DB_DIR}/db.sqlite3-wal"
+            else
+                rm -f "${TEST_DB_DIR}/db.sqlite3-wal"
+            fi
+            if [ -f "${CURRENT_DIR}/db.sqlite3-shm" ]; then
+                cp -f "${CURRENT_DIR}/db.sqlite3-shm" "${TEST_DB_DIR}/db.sqlite3-shm"
+            else
+                rm -f "${TEST_DB_DIR}/db.sqlite3-shm"
+            fi
+            log "테스트 서버 DB 갱신 완료: ${TEST_DB_DIR}/db.sqlite3"
+        else
+            log "WARN: 테스트 서버 DB 갱신 실패 (복사 오류)"
+        fi
+        if [ "${TEST_WAS_RUNNING}" -eq 1 ]; then
+            if docker start "${TEST_CONTAINER}" >/dev/null 2>&1; then
+                log "테스트 컨테이너 재시작 완료"
+            else
+                log "ERROR: 테스트 컨테이너(${TEST_CONTAINER}) 재시작 실패"
+            fi
+        fi
+    fi
+else
+    log "WARN: 테스트 서버 DB 없음 (${TEST_DB_DIR}/db.sqlite3) — 갱신 건너뜀"
 fi
 
 # --- 8. 백업 크기 리포트 ---

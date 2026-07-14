@@ -74,14 +74,19 @@ log "========== 백업 시작 =========="
 TODAY=$(date +%Y%m%d)
 
 # --- 1. DB 스냅샷 (날짜별 보관) ---
+# 0.6.16 디렉터리 마운트 전환: 정본 = /srv/fcmanager/db/db.sqlite3 (구 레이아웃 fallback 유지).
 DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
 log "DB 스냅샷 복사 중..."
-if scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3" "${DB_SNAPSHOT}"; then
+if scp -q "${REMOTE}:${REMOTE_PATH}/db/db.sqlite3" "${DB_SNAPSHOT}"; then
+    scp -q "${REMOTE}:${REMOTE_PATH}/db/db.sqlite3-wal" "${DB_SNAPSHOT}-wal" 2>/dev/null || true
+    scp -q "${REMOTE}:${REMOTE_PATH}/db/db.sqlite3-shm" "${DB_SNAPSHOT}-shm" 2>/dev/null || true
+    log "DB 스냅샷 완료: ${DB_SNAPSHOT} (+wal/shm)"
+elif scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3" "${DB_SNAPSHOT}"; then
     scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3-wal" "${DB_SNAPSHOT}-wal" 2>/dev/null || true
     scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3-shm" "${DB_SNAPSHOT}-shm" 2>/dev/null || true
-    log "DB 스냅샷 완료: ${DB_SNAPSHOT} (+wal/shm)"
+    log "DB 스냅샷 완료(구 레이아웃): ${DB_SNAPSHOT} (+wal/shm)"
 else
-    log "ERROR: DB 스냅샷 실패 (${REMOTE}:${REMOTE_PATH}/db.sqlite3)"
+    log "ERROR: DB 스냅샷 실패 (${REMOTE}:${REMOTE_PATH}/db/db.sqlite3 및 구 레이아웃 모두)"
     exit 1
 fi
 
