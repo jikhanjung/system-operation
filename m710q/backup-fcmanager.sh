@@ -4,7 +4,11 @@
 # 운영서버(dolfinid)에서 이 서버로 DB·media·.env 를 SSH pull 하여 보관.
 # fsis2026 backup-fsis.sh 를 FCManager 규모로 단순화(단일 DB + media).
 #
-# cron 등록(m710q): crontab -e →  0 4 * * * /home/jikhanjung/scripts/backup-fcmanager.sh
+# ⚠️ 실행본은 /home/jikhanjung/scripts/backup-fcmanager.sh 다(cron 이 그걸 부른다). 이 repo 파일이
+#    정본이며, 고치면 **호스트로 복사해야 반영된다** — self-heal 이 없는 유일한 백업 레인이라
+#    2026-07-14~15 에 실제로 드리프트했다(repo 사본만 구 DB 경로에 머묾). DEPLOY.md 0.6.24 참조.
+#
+# cron 등록(m710q): crontab -e →  0 5 * * * /home/jikhanjung/scripts/backup-fcmanager.sh
 # 수동 전체 스냅:    /home/jikhanjung/scripts/backup-fcmanager.sh --full-snapshot
 #
 # 운영서버 접속은 환경변수로 override 가능(기본값은 아래 설정):
@@ -74,21 +78,79 @@ log "========== 백업 시작 =========="
 TODAY=$(date +%Y%m%d)
 
 # --- 1. DB 스냅샷 (날짜별 보관) ---
-# 0.6.16 디렉터리 마운트 전환: 정본 = /srv/fcmanager/db/db.sqlite3 (구 레이아웃 fallback 유지).
+# **라이브 DB 를 scp 로 긁지 않는다**(0.6.24). 운영은 WAL 이라 가동 중에 본체·-wal·-shm 을 따로
+# 복사하면 그 사이 체크포인트가 끼어 torn 스냅샷이 된다 — 이 트랙이 30일 로컬·90일 NAS 오프사이트를
+# 먹이므로 가장 값진 백업이 가장 검증이 없었다. 대신 운영 hourly backup_db.py 가 online backup API 로
+# 뜨고 PRAGMA integrity_check 까지 통과시킨 **일관된 단일 파일**을 가져온다(계약 §백업 레인).
 DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
-log "DB 스냅샷 복사 중..."
-if scp -q "${REMOTE}:${REMOTE_PATH}/db/db.sqlite3" "${DB_SNAPSHOT}"; then
-    scp -q "${REMOTE}:${REMOTE_PATH}/db/db.sqlite3-wal" "${DB_SNAPSHOT}-wal" 2>/dev/null || true
-    scp -q "${REMOTE}:${REMOTE_PATH}/db/db.sqlite3-shm" "${DB_SNAPSHOT}-shm" 2>/dev/null || true
-    log "DB 스냅샷 완료: ${DB_SNAPSHOT} (+wal/shm)"
-elif scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3" "${DB_SNAPSHOT}"; then
-    scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3-wal" "${DB_SNAPSHOT}-wal" 2>/dev/null || true
-    scp -q "${REMOTE}:${REMOTE_PATH}/db.sqlite3-shm" "${DB_SNAPSHOT}-shm" 2>/dev/null || true
-    log "DB 스냅샷 완료(구 레이아웃): ${DB_SNAPSHOT} (+wal/shm)"
-else
-    log "ERROR: DB 스냅샷 실패 (${REMOTE}:${REMOTE_PATH}/db/db.sqlite3 및 구 레이아웃 모두)"
+log "운영 hourly 스냅샷 조회 중..."
+SNAP_INFO=$(ssh "${REMOTE}" "f=\$(ls -t ${REMOTE_PATH}/backup/fcmanager_*.sqlite3 2>/dev/null | head -1); \
+    [ -n \"\$f\" ] && echo \"\$f \$(( ( \$(date +%s) - \$(stat -c %Y \"\$f\") ) / 60 ))\"" 2>/dev/null || true)
+if [ -z "${SNAP_INFO}" ]; then
+    log "ERROR: 운영 hourly 스냅샷 없음 (${REMOTE_PATH}/backup/fcmanager_*.sqlite3) — backup_db.py cron 확인"
     exit 1
 fi
+REMOTE_SNAP=${SNAP_INFO%% *}
+SNAP_AGE_MIN=${SNAP_INFO##* }
+# 신선도 게이트: 매시 도는 백업이 2시간 넘게 낡았다 = cron 중단, 또는 **무결성 게이트가 채택을 막는 중**.
+# 후자는 운영 DB 손상 신호다. 배포 때만 도는 smoke/센티넬과 달리 이 경로는 **매일** 사람에게 닿는다
+# (실패 시 telegram) — 배포가 뜸해도 탐지가 뜸해지지 않게 하는 두 번째 채널.
+if [ "${SNAP_AGE_MIN}" -gt 120 ]; then
+    log "ERROR: 운영 최신 스냅샷이 ${SNAP_AGE_MIN}분 전 것(>2h). hourly 중단 또는 무결성 게이트가 채택 차단 중 — ${REMOTE}:${REMOTE_PATH}/db/INTEGRITY_FAIL 과 backup/backup.log 확인"
+    exit 1
+fi
+log "최신 스냅샷: $(basename "${REMOTE_SNAP}") (${SNAP_AGE_MIN}분 전)"
+if ! scp -q "${REMOTE}:${REMOTE_SNAP}" "${DB_SNAPSHOT}.tmp"; then
+    rm -f "${DB_SNAPSHOT}.tmp"
+    log "ERROR: DB 스냅샷 pull 실패 (${REMOTE}:${REMOTE_SNAP})"
+    exit 1
+fi
+# 채택 전 검증(계약 MUST) — 전송 손상까지 여기서 걸린다. 실패하면 아래 cleanup_tiered 에 **도달하지
+# 않는다**: 새 스냅샷 없이 과거를 지우면 30일/90일 보관 창이 소리 없이 깎인다.
+#
+# 검사 커넥션을 **읽기 전용으로 열지 않는다**: 스냅샷이 WAL 모드면(0.6.24 이전 backup_db.py 가 뜬 것,
+# 또는 소스 저널 모드를 물려받은 것) mode=ro 리더는 -shm 을 만들어놓고 **치울 권한이 없어** 매시 고아를
+# 남긴다 — 이름이 `*.tmp-shm` 이라 cleanup_tiered 의 glob(`db_*.sqlite3`)에도 안 걸려 영구 누적된다
+# (cdGTS devlog 150 §10 이 실측으로 잡은 함정. 이 스크립트도 첫 실행에서 그대로 재현했다).
+# 대상은 우리가 방금 받은 임시 파일이지 라이브 DB 가 아니므로 rw 로 여는 게 맞다: 마지막 커넥션이
+# 정상 종료하면 sqlite 가 -wal/-shm 을 스스로 지우고, journal_mode=DELETE 로 내려 **아카이브가
+# 운영 코드 버전과 무관하게 항상 단일 파일**이 되게 한다.
+# 여기서 **반출 위생도 한 번 더** 건다(방어적, 0.6.25): 운영 backup_db.py 가 이미 django_session 을
+# 지우고 내보내지만, 그건 **상대 코드 버전에 기댄 가정**이다(구버전 운영·수동 스냅샷·타 호스트).
+# 이 스크립트가 바로 그 사본을 NAS(0777·90일)와 테스트 컨테이너로 밀어넣는 당사자라, 신뢰 경계를
+# 넘기 직전인 여기서 자기 책임으로 확인한다. 이미 깨끗하면 0행 삭제 = 무해.
+# (오늘의 교훈 동형: "생산자만 고치면 끝이 아니다" — 소비자도 자기 보장을 가져야 한다.)
+# 출력 규약 = 마지막 줄 `<integrity>|<제거행수>`. 2>&1 로 예외 메시지를 잡으므로 **파이썬이
+# stdout/stderr 에 다른 걸 찍으면 안 된다**(찍으면 그 잡음이 그대로 판정 문자열이 된다).
+SANITIZE_OUT=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('${DB_SNAPSHOT}.tmp')
+result = conn.execute('PRAGMA integrity_check').fetchone()[0]
+removed = 0
+if result == 'ok':
+    has = conn.execute(\"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='django_session'\").fetchone()[0]
+    if has:
+        removed = conn.execute('SELECT count(*) FROM django_session').fetchone()[0]
+        if removed:
+            conn.execute('DELETE FROM django_session')
+            conn.commit()
+    conn.execute('PRAGMA journal_mode=DELETE')   # 아카이브에 동시 writer 는 없다 — WAL 일 이유가 없다
+    conn.execute('VACUUM')                       # free page 제거(secure_delete 기본값에 기대지 않는 보장)
+conn.close()
+print(f'{result}|{removed}')" 2>&1) || SANITIZE_OUT="열기/PRAGMA 실패: ${SANITIZE_OUT}|0"
+LAST_LINE=${SANITIZE_OUT##*$'\n'}
+INTEGRITY=${LAST_LINE%%|*}
+SESSIONS_REMOVED=${LAST_LINE##*|}
+rm -f "${DB_SNAPSHOT}.tmp-wal" "${DB_SNAPSHOT}.tmp-shm"   # 위가 중간에 죽었을 때의 안전망
+if [ "${INTEGRITY}" != "ok" ]; then
+    rm -f "${DB_SNAPSHOT}.tmp"
+    log "ERROR: pull 한 스냅샷이 integrity_check 실패 (${INTEGRITY}) — 미채택, 과거 스냅샷 보존"
+    exit 1
+fi
+mv -f "${DB_SNAPSHOT}.tmp" "${DB_SNAPSHOT}"
+# 구 실행(라이브 scp 시절)이 남긴 형제 파일 제거 — 남겨두면 새 본체에 낡은 -wal 이 얹힌 꼴이 된다.
+rm -f "${DB_SNAPSHOT}-wal" "${DB_SNAPSHOT}-shm"
+log "DB 스냅샷 완료: ${DB_SNAPSHOT} (integrity ok, 단일 파일, 반출 위생: 세션 ${SESSIONS_REMOVED}행 제거)"
 
 DELETED=$(cleanup_tiered "${DB_HISTORY_DIR}" "db_*.sqlite3" "db_" "sqlite3" ${LOCAL_DAILY_DAYS})
 [ "${DELETED}" -gt 0 ] && log "로컬 DB 정리: ${DELETED}개 삭제 (${LOCAL_DAILY_DAYS}일 초과, 월초/연말 보존)"
@@ -117,9 +179,10 @@ fi
 
 # --- 5. 현재 DB도 current/에 동기화 ---
 cp "${DB_SNAPSHOT}" "${CURRENT_DIR}/db.sqlite3"
-cp -f "${DB_SNAPSHOT}-wal" "${CURRENT_DIR}/db.sqlite3-wal" 2>/dev/null || true
-cp -f "${DB_SNAPSHOT}-shm" "${CURRENT_DIR}/db.sqlite3-shm" 2>/dev/null || true
-log "current/db.sqlite3 동기화 완료 (+wal/shm)"
+# 스냅샷은 단일 파일 — 종전(라이브 scp) 실행이 남긴 형제 파일을 반드시 치운다. 남기면 새 본체 옆에
+# 낡은 -wal 이 붙은 상태가 된다.
+rm -f "${CURRENT_DIR}/db.sqlite3-wal" "${CURRENT_DIR}/db.sqlite3-shm"
+log "current/db.sqlite3 동기화 완료 (단일 파일)"
 
 # --- 6. NAS 백업 (마운트돼 있을 때만) ---
 if timeout 10 test -d "${NAS_DIR}"; then
@@ -127,8 +190,8 @@ if timeout 10 test -d "${NAS_DIR}"; then
     NAS_CURRENT="${NAS_DIR}/current"
     mkdir -p "${NAS_DB_DIR}" "${NAS_CURRENT}"
     cp "${DB_SNAPSHOT}" "${NAS_DB_DIR}/db_${TODAY}.sqlite3"
-    cp -f "${DB_SNAPSHOT}-wal" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-wal" 2>/dev/null || true
-    cp -f "${DB_SNAPSHOT}-shm" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-shm" 2>/dev/null || true
+    rm -f "${NAS_DB_DIR}/db_${TODAY}.sqlite3-wal" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-shm" \
+          "${NAS_CURRENT}/db.sqlite3-wal" "${NAS_CURRENT}/db.sqlite3-shm"   # 단일 파일 — 잔재 제거
     rsync -az --no-group --delete "${CURRENT_DIR}/media/" "${NAS_CURRENT}/media/" >> "${LOG_FILE}" 2>&1
     [ -f "${CURRENT_DIR}/.env" ] && cp "${CURRENT_DIR}/.env" "${NAS_CURRENT}/.env"
     cp "${DB_SNAPSHOT}" "${NAS_CURRENT}/db.sqlite3"
@@ -200,22 +263,33 @@ if timeout 10 test -d "${NAS_DIR}"; then
     log "NAS media 스냅트리 동기화 완료 (-H)"
 fi
 
-# --- 8. 개발 환경(dev_data) 동기화 (디렉토리 있을 때만) ---
-DEV_DATA_DIR="/home/jikhanjung/dev_data/fcmanager"
-if [ -d "${DEV_DATA_DIR}" ]; then
-    cp -f "${CURRENT_DIR}/db.sqlite3" "${DEV_DATA_DIR}/db.sqlite3"
-    for ext in wal shm; do
-        if [ -f "${CURRENT_DIR}/db.sqlite3-${ext}" ]; then
-            cp -f "${CURRENT_DIR}/db.sqlite3-${ext}" "${DEV_DATA_DIR}/db.sqlite3-${ext}"
-        else
-            rm -f "${DEV_DATA_DIR}/db.sqlite3-${ext}"
-        fi
-    done
-    mkdir -p "${DEV_DATA_DIR}/media"
-    rsync -a --delete "${CURRENT_DIR}/media/" "${DEV_DATA_DIR}/media/" >> "${LOG_FILE}" 2>&1
-    log "dev_data 동기화 완료: ${DEV_DATA_DIR}"
+# --- 8. m710q 테스트 타깃(/srv/fcmanager, :8005 컨테이너) DB 갱신 ---
+# 종전엔 ~/dev_data/fcmanager 를 채웠으나(runserver 런처용) 테스트는 도커 타깃으로 일원화했다
+# (0.6.24) — 미러가 둘이면 드리프트만 는다.
+#
+# ⚠️ 여기가 cdGTS devlog 149 가 데인 자리다: 테스트 컨테이너는 이 DB 를 **WAL 로 쥐고 있고**,
+#    쥔 채로 파일을 갈면 캐시 페이지와 어긋나 btree 가 깨진다(그때 테스트 DB 2회 손상, 9h 미탐지).
+#    그래서 전 서비스 정지 → 교체 → 재기동으로 쓰기 주체를 직렬화하고, **정지에 실패하면 교체하지
+#    않는다**(라이브 교체 금지). `docker compose down` 에 서비스명을 쓰지 않는 것도 같은 교훈 —
+#    사이드카가 생기면 그것만 남아 같은 버그가 재발한다(계약 §규범 MUST).
+TEST_ROOT="/srv/fcmanager"
+if [ ! -d "${TEST_ROOT}/db" ]; then
+    log "WARN: 테스트 타깃 없음 (${TEST_ROOT}/db) — 건너뜀"
+elif ! command -v docker >/dev/null 2>&1 || [ ! -f "${TEST_ROOT}/docker-compose.yml" ]; then
+    log "WARN: docker/compose 없음 — 테스트 타깃 DB 갱신 건너뜀(라이브 교체 금지)"
+elif ! (cd "${TEST_ROOT}" && docker compose down) >> "${LOG_FILE}" 2>&1; then
+    log "WARN: 테스트 컨테이너 정지 실패 — DB 교체 건너뜀(라이브 교체 금지)"
 else
-    log "WARN: dev_data 디렉토리 없음 (${DEV_DATA_DIR}) — 건너뜀"
+    cp -f "${DB_SNAPSHOT}" "${TEST_ROOT}/db/db.sqlite3"
+    # 정지 전 컨테이너가 남긴 형제 파일 제거 — 새 본체에 낡은 -wal 이 얹히면 그것 자체가 손상이다.
+    rm -f "${TEST_ROOT}/db/db.sqlite3-wal" "${TEST_ROOT}/db/db.sqlite3-shm"
+    mkdir -p "${TEST_ROOT}/media"
+    rsync -a --delete "${CURRENT_DIR}/media/" "${TEST_ROOT}/media/" >> "${LOG_FILE}" 2>&1
+    if (cd "${TEST_ROOT}" && docker compose up -d) >> "${LOG_FILE}" 2>&1; then
+        log "테스트 타깃 갱신 완료: ${TEST_ROOT} (정지→교체→재기동)"
+    else
+        log "ERROR: 테스트 컨테이너 재기동 실패 — DB 는 교체됨, ${TEST_ROOT} 에서 docker compose up -d 확인"
+    fi
 fi
 
 # --- 9. 리포트 ---
