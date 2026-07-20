@@ -81,6 +81,21 @@ else
   ok_all=0
 fi
 
+# naverland 크롤러: run-crawler.sh(02:00)가 남긴 상태 파일(오늘·SUCCESS 확인)
+NL_STATUS="/srv/naverland/logs/crawler_status.txt"
+nl_line=$(head -1 "$NL_STATUS" 2>/dev/null)
+if echo "$nl_line" | grep -q "^${TODAY}"; then
+  if echo "$nl_line" | grep -q "SUCCESS"; then
+    lines="${lines}✅ naverland 크롤러 (${nl_line#*| })"$'\n'
+  else
+    lines="${lines}❌ naverland 크롤러 (${nl_line#*| })"$'\n'
+    ok_all=0
+  fi
+else
+  lines="${lines}❌ naverland 크롤러 (오늘 실행 기록 없음)"$'\n'
+  ok_all=0
+fi
+
 if [ "$ok_all" -eq 1 ]; then
   header="✅ 새벽 작업 전부 정상 완료 (${TODAY})"
 else
