@@ -113,7 +113,13 @@ DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
 # online-backup 최신본(backup/fsis_*.sqlite3, 트랜잭션 일관·단일파일)을 당긴다. wal/shm 불필요.
 # cron 은 :05 실행이라 그 시각엔 당시각 스냅샷이 완성돼 있음.
 log "DB 스냅샷 복사 중 (kofhin online-backup 최신본)..."
-LATEST_DB=$(ssh -q "${REMOTE}" "ls -1t ${REMOTE_PATH}/backup/fsis_*.sqlite3 2>/dev/null | head -1")
+# ssh 접속 실패는 set -e 에 걸려 로그 없이 죽던 사각 (2026-07-21 kofhin GCP 정지 때 무로그 실패).
+# BatchMode/ConnectTimeout 없으면 unreachable 호스트에 ~2분 hang 후 침묵 종료.
+if ! LATEST_DB=$(ssh -q -o BatchMode=yes -o ConnectTimeout=15 "${REMOTE}" \
+        "ls -1t ${REMOTE_PATH}/backup/fsis_*.sqlite3 2>/dev/null | head -1"); then
+    log "ERROR: kofhin ssh 접속 실패 (${REMOTE}) — 호스트 다운/네트워크 확인"
+    exit 1
+fi
 if [ -n "${LATEST_DB}" ] && scp -q "${REMOTE}:${LATEST_DB}" "${DB_SNAPSHOT}"; then
     log "DB 스냅샷 완료: ${DB_SNAPSHOT} ← ${LATEST_DB##*/} (online-backup, 일관)"
 else

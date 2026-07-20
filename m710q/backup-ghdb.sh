@@ -77,16 +77,64 @@ log "========== GHDB 백업 시작 =========="
 TODAY=$(date +%Y%m%d)
 DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
 
-log "DB 스냅샷 복사 중..."
-if scp -q "${REMOTE}:${REMOTE_PATH}/db_ghdb.sqlite3" "${DB_SNAPSHOT}"; then
-    # WAL 모드 부속 파일도 함께 복사
-    scp -q "${REMOTE}:${REMOTE_PATH}/db_ghdb.sqlite3-wal" "${DB_SNAPSHOT}-wal" 2>/dev/null || true
-    scp -q "${REMOTE}:${REMOTE_PATH}/db_ghdb.sqlite3-shm" "${DB_SNAPSHOT}-shm" 2>/dev/null || true
-    log "DB 스냅샷 완료: ${DB_SNAPSHOT} (+wal/shm)"
-else
-    log "ERROR: DB 스냅샷 실패"
+# **라이브 DB 를 scp 로 긁지 않는다** (2026-07-15, 계약 §백업 레인 "하위 트랙" — fsis/fcmanager 동형).
+# 종전엔 db_ghdb.sqlite3 + -wal + -shm 를 각각 scp(3번) 했다. 문제 둘:
+#   (a) 세 파일이 서로 다른 시점일 수 있다 → torn 스냅샷. 이 트랙이 30일 로컬·90일 NAS 오프사이트를
+#       먹이므로 **가장 값진 사본이 가장 검증이 없었다**.
+#   (b) 당시 ghdb 는 journal_mode=delete 라 -wal/-shm 이 없었고(뒤 2번은 늘 실패하는 무의미한 호출),
+#       0.5.86 부터는 WAL 이라 실제로 형제가 생긴다 → raw scp 였다면 torn 위험이 진짜가 됐을 것.
+# 이제 구 서버가 매시 online backup API 로 뜨고 PRAGMA integrity_check 를 통과시킨 **일관된 단일
+# 파일**(backup/ghdb_*.sqlite3)을 가져온다(0.5.86, devlog 221 — ghdb hourly 트랙 신설).
+log "운영 hourly 스냅샷 조회 중..."
+SNAP_INFO=$(ssh -q -o BatchMode=yes -o ConnectTimeout=15 "${REMOTE}" \
+    "f=\$(ls -t ${REMOTE_PATH}/backup/ghdb_*.sqlite3 2>/dev/null | head -1); \
+    [ -n \"\$f\" ] && echo \"\$f \$(( ( \$(date +%s) - \$(stat -c %Y \"\$f\") ) / 60 ))\"" 2>/dev/null || true)
+if [ -z "${SNAP_INFO}" ]; then
+    log "ERROR: 운영 hourly 스냅샷 조회 실패 — ssh 접속 불가(호스트 다운?) 또는 ${REMOTE_PATH}/backup/ghdb_*.sqlite3 없음(backup_db.py cron 확인)"
     exit 1
 fi
+REMOTE_SNAP=${SNAP_INFO%% *}
+SNAP_AGE_MIN=${SNAP_INFO##* }
+# 신선도 게이트: 매시 도는 백업이 2시간 넘게 낡았다 = cron 중단, 또는 **무결성 게이트가 채택을 막는 중**
+# (= 운영 DB 손상 신호). ghdb 는 배포가 드물어 센티넬→smoke 경로가 사실상 안 도는데, 이 트랙은 **매일**
+# 돌고 실패 시 telegram 이 뜬다 — 배포와 무관한 탐지 채널(계약 §백업 레인 "덤").
+if [ "${SNAP_AGE_MIN}" -gt 120 ]; then
+    log "ERROR: 운영 최신 스냅샷이 ${SNAP_AGE_MIN}분 전 것(>2h). hourly 중단 또는 무결성 게이트가 채택 차단 중 — ${REMOTE}:${REMOTE_PATH}/db/INTEGRITY_FAIL 과 backup/backup.log 확인"
+    exit 1
+fi
+log "최신 스냅샷: $(basename "${REMOTE_SNAP}") (${SNAP_AGE_MIN}분 전)"
+
+if ! scp -q "${REMOTE}:${REMOTE_SNAP}" "${DB_SNAPSHOT}.tmp"; then
+    rm -f "${DB_SNAPSHOT}.tmp"
+    log "ERROR: DB 스냅샷 pull 실패 (${REMOTE}:${REMOTE_SNAP})"
+    exit 1
+fi
+
+# 채택 전 검증(계약 MUST) — 전송 손상까지 여기서 걸린다. 실패하면 아래 cleanup_ghdb_db 에 **도달하지
+# 않는다**: 새 스냅샷 없이 과거를 지우면 30일/90일 보관 창이 소리 없이 깎인다.
+#
+# 검사 커넥션을 **읽기 전용으로 열지 않는다**: 대상은 방금 받은 우리 임시 파일이지 라이브 DB 가 아니다.
+# mode=ro 리더는 스냅샷이 WAL 이면 -shm 을 만들어놓고 **치울 권한이 없어** 고아를 남긴다(이름이
+# `*.tmp-shm` 이라 cleanup_ghdb_db 의 glob 에도 안 걸려 영구 누적 — cdGTS devlog 150 §10). rw 로 열면
+# 마지막 커넥션이 정상 종료할 때 sqlite 가 -wal/-shm 을 스스로 지우므로, **상대 저널 모드와 무관하게**
+# 아카이브가 항상 단일 파일이 된다.
+INTEGRITY=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('${DB_SNAPSHOT}.tmp')
+result = conn.execute('PRAGMA integrity_check').fetchone()[0]
+if result == 'ok':
+    conn.execute('PRAGMA journal_mode=DELETE')
+conn.close()
+print(result)" 2>&1) || INTEGRITY="열기/PRAGMA 실패: ${INTEGRITY}"
+rm -f "${DB_SNAPSHOT}.tmp-wal" "${DB_SNAPSHOT}.tmp-shm"   # 위가 중간에 죽었을 때의 안전망
+if [ "${INTEGRITY}" != "ok" ]; then
+    rm -f "${DB_SNAPSHOT}.tmp"
+    log "ERROR: pull 한 스냅샷이 integrity_check 실패 (${INTEGRITY}) — 미채택, 과거 스냅샷 보존"
+    exit 1
+fi
+mv -f "${DB_SNAPSHOT}.tmp" "${DB_SNAPSHOT}"
+rm -f "${DB_SNAPSHOT}-wal" "${DB_SNAPSHOT}-shm"           # 구 3-scp 시대 잔재(있다면)
+log "DB 스냅샷 완료: ${DB_SNAPSHOT} ← $(basename "${REMOTE_SNAP}") (online-backup, integrity ok, 단일 파일)"
 
 # 로컬 DB 정리 (N일 초과 → 월초만 보관, 12/01 영구)
 DELETED=$(cleanup_ghdb_db "${DB_HISTORY_DIR}" ${LOCAL_DAILY_DAYS})
@@ -109,10 +157,12 @@ scp -q "${REMOTE}:${REMOTE_PATH}/.env" "${CURRENT_DIR}/.env" 2>/dev/null && \
     log "WARN: .env 파일 없음 (건너뜀)"
 
 # --- 4. 현재 DB도 current/에 동기화 ---
+# 스냅샷은 단일 파일(online-backup + journal_mode=DELETE) — 형제 파일을 나르지 않는다.
+# 구 3-scp 시대가 남긴 형제가 있으면 반드시 치운다: 새 본체 옆에 낡은 -wal 이 얹히면 sqlite 가
+# 그 -wal 을 본체에 적용하려 들어 **오히려 손상**이다.
 cp "${DB_SNAPSHOT}" "${CURRENT_DIR}/db_ghdb.sqlite3"
-cp -f "${DB_SNAPSHOT}-wal" "${CURRENT_DIR}/db_ghdb.sqlite3-wal" 2>/dev/null || true
-cp -f "${DB_SNAPSHOT}-shm" "${CURRENT_DIR}/db_ghdb.sqlite3-shm" 2>/dev/null || true
-log "current/db_ghdb.sqlite3 동기화 완료 (+wal/shm)"
+rm -f "${CURRENT_DIR}/db_ghdb.sqlite3-wal" "${CURRENT_DIR}/db_ghdb.sqlite3-shm"
+log "current/db_ghdb.sqlite3 동기화 완료 (단일 파일)"
 
 # --- 5. NAS 백업 ---
 if timeout 10 test -d "${NAS_DIR}"; then
@@ -120,11 +170,10 @@ if timeout 10 test -d "${NAS_DIR}"; then
     NAS_CURRENT="${NAS_DIR}/current"
     mkdir -p "${NAS_DB_DIR}" "${NAS_CURRENT}"
 
-    # NAS DB 스냅샷
+    # NAS DB 스냅샷 (단일 파일 — 형제 없음)
     cp "${DB_SNAPSHOT}" "${NAS_DB_DIR}/db_${TODAY}.sqlite3"
-    cp -f "${DB_SNAPSHOT}-wal" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-wal" 2>/dev/null || true
-    cp -f "${DB_SNAPSHOT}-shm" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-shm" 2>/dev/null || true
-    log "NAS DB 스냅샷 완료 (+wal/shm)"
+    rm -f "${NAS_DB_DIR}/db_${TODAY}.sqlite3-wal" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-shm"
+    log "NAS DB 스냅샷 완료 (단일 파일)"
 
     # NAS uploads 미러링
     rsync -az --no-group --delete "${CURRENT_DIR}/uploads/" "${NAS_CURRENT}/uploads/" >> "${LOG_FILE}" 2>&1
@@ -133,8 +182,7 @@ if timeout 10 test -d "${NAS_DIR}"; then
     # NAS .env
     [ -f "${CURRENT_DIR}/.env" ] && cp "${CURRENT_DIR}/.env" "${NAS_CURRENT}/.env"
     cp "${DB_SNAPSHOT}" "${NAS_CURRENT}/db_ghdb.sqlite3"
-    cp -f "${DB_SNAPSHOT}-wal" "${NAS_CURRENT}/db_ghdb.sqlite3-wal" 2>/dev/null || true
-    cp -f "${DB_SNAPSHOT}-shm" "${NAS_CURRENT}/db_ghdb.sqlite3-shm" 2>/dev/null || true
+    rm -f "${NAS_CURRENT}/db_ghdb.sqlite3-wal" "${NAS_CURRENT}/db_ghdb.sqlite3-shm"   # 구 3-scp 잔재
 
     # NAS DB 정리 (N일 초과 → 월초만 보관, 12/01 영구)
     NAS_DEL=$(cleanup_ghdb_db "${NAS_DB_DIR}" ${NAS_DAILY_DAYS})
