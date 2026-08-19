@@ -21,13 +21,17 @@ system-operation/
 
 | 파일 | cron | 설명 |
 |------|------|------|
-| `database_backup.sh` | `0 1 * * *` | dolfinserver DB 백업 (로컬 + NAS, 계층형 보관) |
 | `backup-fsis.sh`     | `5 3 * * *` | fsis2026 백업 (운영서버 online-backup pull → 로컬 + NAS + 테스트 컨테이너 갱신) |
 | `backup-ghdb.sh`     | `30 3 * * *` | GHDB 백업 |
 | `backup-fcmanager.sh`| `0 5 * * *` | fcmanager 백업 |
 | `pull-repos.sh`      | `0 6 * * *` | `~/projects` 밑 모든 git repo 를 `--ff-only` pull |
 | `morning-summary.sh` | `30 7 * * *` | 새벽 작업 결과를 점검해 텔레그램 요약 1통 발송 |
 | `notify-telegram.sh` | (헬퍼) | 공용 텔레그램 전송기. 다른 스크립트가 호출 |
+| `lib/refresh-test-db.sh` | (헬퍼) | 로컬 테스트 컨테이너 DB 갱신. `backup-fsis/ghdb` 가 source |
+
+`database_backup.sh`(dolfinserver DB 백업)는 2026-08-17 은퇴 — 운영 측 online-backup
+(`/srv/dolfinserver/scripts/backup_db.py`, cron `0 1`)으로 이관됐다.
+디렉터리에 처음 들어온 사람을 위한 안내는 [`m710q/README.md`](m710q/README.md) 참조.
 
 폐기된 스크립트는 `_retired/` 에 보관한다
 (예: `backup-fcsky.sh` — FcSky→fcmanager 이관으로 2026-06-22 폐기).
