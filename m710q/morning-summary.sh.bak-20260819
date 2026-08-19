@@ -13,7 +13,7 @@ lines=""
 # 백업 작업: 로그에 "오늘 날짜 ... 완료 ==========" 라인이 있으면 성공
 check_backup() {
   local name="$1" logf="$2"
-  if grep -qE "^\\[?${TODAY}.*완료 ==========" "$logf" 2>/dev/null; then
+  if grep -qE "^${TODAY}.*완료 ==========" "$logf" 2>/dev/null; then
     lines="${lines}✅ ${name}"$'\n'
   else
     lines="${lines}❌ ${name} (오늘 완료 기록 없음)"$'\n'
@@ -21,7 +21,7 @@ check_backup() {
   fi
 }
 
-check_backup "dolfin DB"  "/srv/dolfinserver/logs/backup.log"
+check_backup "dolfin DB"  "/home/jikhanjung/backup/backup.log"
 check_backup "fsis2026"   "/home/jikhanjung/backups/fsis2026/backup.log"
 check_backup "ghdb"       "/home/jikhanjung/backups/ghdb/backup.log"
 check_backup "fcmanager"  "/home/jikhanjung/backups/fcmanager/backup.log"
