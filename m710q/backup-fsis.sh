@@ -48,6 +48,10 @@ log() {
     case "$1" in *ERROR*) notify_fail "$1" ;; esac
 }
 
+# --- 공유 헬퍼 (테스트 컨테이너 DB 갱신 — backup-fsis/ghdb 공용) ---
+# shellcheck source=lib/refresh-test-db.sh
+. /home/jikhanjung/scripts/lib/refresh-test-db.sh
+
 # 계층형 정리: N일 초과 → 매달 1일만 보관, 12월 1일은 영구 보관
 # 파일명 패턴: db_YYYYMMDD.sqlite3
 cleanup_fsis_db() {
@@ -352,48 +356,9 @@ else
 fi
 
 # --- 7.5. 테스트 서버(로컬 fsis 컨테이너) DB 갱신 ---
-# 테스트 컨테이너는 m710q 의 /srv/fsis2026/db.sqlite3 를 바인드 마운트 (deploy-dev).
-# 컨테이너 가동 중 파일 교체 금지 (dual-writer, devlog 074) → 정지 → 복사 → 재시작.
-TEST_DB_DIR="/srv/fsis2026"
-TEST_CONTAINER="fsis"
-if [ -f "${TEST_DB_DIR}/db.sqlite3" ]; then
-    TEST_WAS_RUNNING=0
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${TEST_CONTAINER}"; then
-        if docker stop "${TEST_CONTAINER}" >/dev/null 2>&1; then
-            TEST_WAS_RUNNING=1
-        else
-            TEST_WAS_RUNNING=-1
-            log "WARN: 테스트 컨테이너(${TEST_CONTAINER}) 정지 실패 — 테스트 DB 갱신 건너뜀"
-        fi
-    fi
-    if [ "${TEST_WAS_RUNNING}" -ge 0 ]; then
-        if cp -f "${CURRENT_DIR}/db.sqlite3" "${TEST_DB_DIR}/db.sqlite3"; then
-            # WAL/SHM 은 스냅샷 쌍으로 맞춤 (prod 에 없으면 테스트 쪽도 제거)
-            if [ -f "${CURRENT_DIR}/db.sqlite3-wal" ]; then
-                cp -f "${CURRENT_DIR}/db.sqlite3-wal" "${TEST_DB_DIR}/db.sqlite3-wal"
-            else
-                rm -f "${TEST_DB_DIR}/db.sqlite3-wal"
-            fi
-            if [ -f "${CURRENT_DIR}/db.sqlite3-shm" ]; then
-                cp -f "${CURRENT_DIR}/db.sqlite3-shm" "${TEST_DB_DIR}/db.sqlite3-shm"
-            else
-                rm -f "${TEST_DB_DIR}/db.sqlite3-shm"
-            fi
-            log "테스트 서버 DB 갱신 완료: ${TEST_DB_DIR}/db.sqlite3"
-        else
-            log "WARN: 테스트 서버 DB 갱신 실패 (복사 오류)"
-        fi
-        if [ "${TEST_WAS_RUNNING}" -eq 1 ]; then
-            if docker start "${TEST_CONTAINER}" >/dev/null 2>&1; then
-                log "테스트 컨테이너 재시작 완료"
-            else
-                log "ERROR: 테스트 컨테이너(${TEST_CONTAINER}) 재시작 실패"
-            fi
-        fi
-    fi
-else
-    log "WARN: 테스트 서버 DB 없음 (${TEST_DB_DIR}/db.sqlite3) — 갱신 건너뜀"
-fi
+# 대상 경로는 refresh_test_db 가 컨테이너 DATABASE_PATH + 마운트에서 역산한다
+# (하드코딩 금지 이유는 lib/refresh-test-db.sh 주석 참조 — 2026-08-19 경로 드리프트 사고)
+refresh_test_db "fsis" "${CURRENT_DIR}/db.sqlite3"
 
 # --- 8. 백업 크기 리포트 ---
 DB_SIZE=$(du -sh "${DB_SNAPSHOT}" 2>/dev/null | cut -f1)

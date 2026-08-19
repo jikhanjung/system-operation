@@ -43,6 +43,10 @@ log() {
     case "$1" in *ERROR*) notify_fail "$1" ;; esac
 }
 
+# --- 공유 헬퍼 (테스트 컨테이너 DB 갱신 — backup-fsis/ghdb 공용) ---
+# shellcheck source=lib/refresh-test-db.sh
+. /home/jikhanjung/scripts/lib/refresh-test-db.sh
+
 # 계층형 정리: N일 초과 → 매달 1일만 보관, 12월 1일은 영구 보관
 # 파일명 패턴: db_YYYYMMDD.sqlite3
 cleanup_ghdb_db() {
@@ -287,6 +291,11 @@ if timeout 10 test -d "${NAS_DIR}"; then
         "${UPLOADS_SNAP_DIR}/" "${NAS_UPLOADS_SNAP_DIR}/" >> "${LOG_FILE}" 2>&1
     log "NAS uploads 스냅트리 동기화 완료 (-H)"
 fi
+
+# --- 6.5. 테스트 서버(로컬 ghdb 컨테이너) DB 갱신 ---
+# 2026-08-19 추가 — fsis 에는 있고 ghdb 에는 없던 단계. 개발 ghdb 는 7/23 시딩 이후
+# 한 달간 정체돼 있었다. 대상 경로는 컨테이너에서 역산 (lib/refresh-test-db.sh)
+refresh_test_db "ghdb" "${CURRENT_DIR}/db_ghdb.sqlite3"
 
 # --- 7. 백업 크기 리포트 ---
 DB_SIZE=$(du -sh "${DB_SNAPSHOT}" 2>/dev/null | cut -f1)
