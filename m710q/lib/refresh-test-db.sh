@@ -97,3 +97,77 @@ refresh_test_db() {
     fi
     return 0
 }
+
+
+# =============================================================================
+# sync_test_uploads <container> <src_dir>
+#
+# 테스트 컨테이너의 media(uploads) 를 그날 받은 운영 미러로 맞춘다.
+#
+# DB 만 갱신하고 uploads 를 놔두면 **DB 에는 있는데 파일이 없는** 상태가 된다.
+# 실제로 2026-03-04 이후 테스트 fsis 의 uploads 가 멈춰 있었고, 그 사이 올라온 PDF
+# (2026년 논문 63건 등)는 논문 상세에서 "PDF 보기"를 눌러도 열리지 않았다
+# (fsis2026 devlog 239). DB 를 매일 새로 주는 이상 uploads 도 같이 따라가야 짝이 맞는다.
+#
+# 경로는 하드코딩하지 않는다 — 컨테이너의 MEDIA_ROOT 를 읽어 마운트로 역매핑한다.
+# **`--delete` 는 쓰지 않는다**: 테스트기에만 있는 파일(옛 파일명 잔재·테스트 업로드)을
+# 지울 이유가 없고, 잘못 지우면 되돌릴 곳이 없다. 디스크는 rsync 증분이라 실사용분만 는다.
+# DB 와 달리 **컨테이너를 세우지 않는다** — media 는 파일 읽기라 dual-writer 문제가 없다.
+# =============================================================================
+
+sync_test_uploads() {
+    local container="$1" src="$2"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        log "WARN: docker 없음 — 테스트 uploads 동기화 건너뜀"
+        return 0
+    fi
+    if ! docker inspect "${container}" >/dev/null 2>&1; then
+        log "WARN: 테스트 컨테이너(${container}) 없음 — 테스트 uploads 동기화 건너뜀"
+        return 0
+    fi
+    if [ ! -d "${src}" ]; then
+        log "ERROR: 테스트 uploads 소스 없음 (${src}) — 동기화 건너뜀"
+        return 0
+    fi
+
+    local mroot
+    mroot=$(docker inspect "${container}" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | sed -n 's/^MEDIA_ROOT=//p' | head -1)
+    if [ -z "${mroot}" ]; then
+        log "ERROR: ${container} 에 MEDIA_ROOT 없음 — 테스트 uploads 동기화 불가"
+        return 0
+    fi
+
+    local dest="" best=0 mdst msrc rest
+    while IFS=$'\t' read -r mdst msrc; do
+        [ -n "${mdst}" ] || continue
+        if [ "${mroot}" = "${mdst}" ]; then
+            if [ ${#mdst} -gt ${best} ]; then best=${#mdst}; dest="${msrc}"; fi
+        else
+            case "${mroot}" in
+                "${mdst}"/*)
+                    if [ ${#mdst} -gt ${best} ]; then
+                        best=${#mdst}; rest=${mroot#"${mdst}"}; dest="${msrc}${rest}"
+                    fi ;;
+            esac
+        fi
+    done < <(docker inspect "${container}" \
+             --format '{{range .Mounts}}{{.Destination}}{{"\t"}}{{.Source}}{{"\n"}}{{end}}')
+
+    if [ -z "${dest}" ]; then
+        log "ERROR: ${container} 의 MEDIA_ROOT(${mroot})가 바인드 마운트 밖 — uploads 동기화 불가"
+        return 0
+    fi
+
+    mkdir -p "${dest}"
+    local stats n bytes
+    if stats=$(rsync -a --info=stats2 "${src}/" "${dest}/" 2>&1); then
+        n=$(echo "${stats}" | sed -n 's/^Number of regular files transferred: *//p' | tr -d ',')
+        bytes=$(echo "${stats}" | sed -n 's/^Total transferred file size: *//p' | tr -d ',' | awk '{print $1}')
+        log "테스트 uploads 동기화 완료: ${container} (${mroot} → ${dest}), 신규/변경 ${n:-0} 파일 $(( ${bytes:-0} / 1024 / 1024 )) MB"
+    else
+        log "ERROR: 테스트 uploads 동기화 실패 (${dest}): $(echo "${stats}" | tail -1)"
+    fi
+    return 0
+}

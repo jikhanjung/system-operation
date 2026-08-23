@@ -360,6 +360,11 @@ fi
 # (하드코딩 금지 이유는 lib/refresh-test-db.sh 주석 참조 — 2026-08-19 경로 드리프트 사고)
 refresh_test_db "fsis" "${CURRENT_DIR}/db.sqlite3"
 
+# --- 7.6. 테스트 서버 uploads 동기화 ---
+# DB 만 갱신하고 media 를 놔두면 "DB 엔 있는데 파일이 없는" 상태가 된다 —
+# 2026-03-04 이후 멈춰 있어 그 사이 올라온 PDF 가 논문 상세에서 안 열렸다(fsis2026 devlog 239).
+sync_test_uploads "fsis" "${CURRENT_DIR}/uploads"
+
 # --- 8. 백업 크기 리포트 ---
 DB_SIZE=$(du -sh "${DB_SNAPSHOT}" 2>/dev/null | cut -f1)
 UPLOADS_SIZE=$(du -sh "${CURRENT_DIR}/uploads/" 2>/dev/null | cut -f1)

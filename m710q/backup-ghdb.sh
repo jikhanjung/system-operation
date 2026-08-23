@@ -296,6 +296,7 @@ fi
 # 2026-08-19 추가 — fsis 에는 있고 ghdb 에는 없던 단계. 개발 ghdb 는 7/23 시딩 이후
 # 한 달간 정체돼 있었다. 대상 경로는 컨테이너에서 역산 (lib/refresh-test-db.sh)
 refresh_test_db "ghdb" "${CURRENT_DIR}/db_ghdb.sqlite3"
+sync_test_uploads "ghdb" "${CURRENT_DIR}/uploads"
 
 # --- 7. 백업 크기 리포트 ---
 DB_SIZE=$(du -sh "${DB_SNAPSHOT}" 2>/dev/null | cut -f1)

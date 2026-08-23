@@ -43,7 +43,7 @@ git add m710q/<파일> && git commit && git push
 | `backup-fsis.sh` | fsis2026 (kofhin) 백업 pull → 로컬 + NAS + dev_data + 테스트 컨테이너 |
 | `backup-ghdb.sh` | ghdb (dolfinid) 백업 pull. 위와 같은 구조 |
 | `backup-fcmanager.sh` | fcmanager 백업 pull |
-| `lib/refresh-test-db.sh` | 테스트 컨테이너 DB 갱신 헬퍼. 위 백업 스크립트들이 `source` |
+| `lib/refresh-test-db.sh` | 테스트 컨테이너 DB·uploads 갱신 헬퍼. 위 백업 스크립트들이 `source` |
 | `pull-repos.sh` | `~/projects` 밑 git repo 전체 `--ff-only` pull |
 | `morning-summary.sh` | 새벽 작업 결과 점검 → 텔레그램 요약 1통 |
 | `notify-telegram.sh` | 공용 텔레그램 전송기 (다른 스크립트가 호출) |
@@ -57,6 +57,10 @@ git add m710q/<파일> && git commit && git push
 - **자격증명은 repo 밖**: `~/.config/telegram/credentials` (권한 600). 여기 두지 말 것.
 - **로그가 이 디렉터리에 떨어진다**: `nightly-ingest.log`, `pull-repos.log`, `ingest-logs/`.
   `.gitignore` 의 `*.log` / `*.log.*` 로 추적 제외돼 있다.
+- **테스트 컨테이너는 DB 와 uploads 를 함께 맞춘다** — 한쪽만 갱신하면 "DB 엔 있는데 파일이
+  없는" 상태가 된다. 실제로 2026-03-04 이후 uploads 가 멈춰 있어, 그 사이 올라온 PDF 가
+  논문 상세에서 안 열렸다(fsis2026 devlog 239). uploads 는 `--delete` 없이 증분 rsync 하고
+  컨테이너도 세우지 않는다(media 는 읽기라 dual-writer 문제 없음).
 - **테스트 컨테이너 DB 경로는 하드코딩하지 않는다** — `lib/refresh-test-db.sh` 가 컨테이너의
   `DATABASE_PATH` 와 마운트 테이블에서 역산하고 `cmp` 로 검증한다. 옛 버전은 경로를 박아두었다가
   파일→디렉터리 마운트 전환을 못 따라가, 한 달간 **"갱신 완료" 를 찍으며 아무도 안 읽는 파일에
