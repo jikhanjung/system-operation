@@ -7,6 +7,32 @@ set -u
 NOTIFY="${NOTIFY:-/home/jikhanjung/scripts/notify-telegram.sh}"   # 테스트 시 스텁으로 교체 가능
 TODAY=$(date +%F)
 
+# 텔레그램 한 통은 4096자가 상한이라 넘으면 전송이 통째로 400 으로 거절된다.
+# 이 요약에서 길이가 자라는 칸은 ingest 커밋 제목 하나뿐이다 — 나머지는 전부
+# 개수·상태라 길어야 수십 자다. 그 제목이 며칠에 걸쳐 754 → 4,354자로 자랐고
+# 2026-09-08 에 총 4,582자가 되어 요약 한 통을 통째로 잃었다. cron 줄에 리다이렉트가
+# 없고 이 기계엔 MTA 도 없어 전송 실패가 아무 데도 안 남는다 — **못 온 것과
+# 안 보낸 것이 구별되지 않는다.** 그래서 여기서 미리 자른다.
+# 잘린 원문은 devdocs 저장소의 커밋 제목이 정본이다.
+SUBJ_MAX="${SUBJ_MAX:-200}"     # ingest 커밋 제목
+REASON_MAX="${REASON_MAX:-120}" # ingest 미완 사유
+
+# cron 은 로케일을 안 물려준다(LANG/LC_ALL 둘 다 unset → C). C 로케일에서
+# ${s:0:n} 은 문자가 아니라 **바이트**로 세어 한글을 중간에서 쪼개고, 깨진
+# UTF-8 은 텔레그램이 거절한다. 자르기 전에 반드시 UTF-8 로케일을 세울 것.
+export LC_ALL=C.utf8
+
+# trim <문자열> <최대 문자수> — 넘치면 자르고 원래 길이를 밝힌다.
+# (말없이 자르면 읽는 사람이 그게 전문인 줄 안다)
+trim() {
+  local s="$1" max="$2"
+  if [ "${#s}" -le "$max" ]; then
+    printf '%s' "$s"
+  else
+    printf '%s… (총 %d자)' "${s:0:$max}" "${#s}"
+  fi
+}
+
 ok_all=1
 lines=""
 
@@ -70,14 +96,14 @@ if echo "$ni_block" | head -1 | grep -q "$TODAY"; then
     ok_all=0
   elif echo "$ni_block" | grep -q 'nightly-ingest done (INCOMPLETE'; then
     ni_reason=$(echo "$ni_block" | sed -n 's/^\[[^]]*\] ❌ ingest 미완: //p' | tail -1)
-    lines="${lines}❌ ingest 미완 (${ni_reason:-사유 미상}) — 다음 실행이 재시도"$'\n'
+    lines="${lines}❌ ingest 미완 ($(trim "${ni_reason:-사유 미상}" "$REASON_MAX")) — 다음 실행이 재시도"$'\n'
     ok_all=0
   elif echo "$ni_block" | grep -q 'ERROR:'; then
     lines="${lines}❌ ingest (ERROR 발생 — 로그 확인)"$'\n'
     ok_all=0
   elif echo "$ni_block" | grep -qE '^\[[^]]*\] pushed: '; then
     subj=$(echo "$ni_block" | sed -n 's/^\[[^]]*\] pushed: [0-9a-f]* \(.*\)/\1/p' | tail -1)
-    lines="${lines}✅ ingest (push: ${subj})"$'\n'
+    lines="${lines}✅ ingest (push: $(trim "$subj" "$SUBJ_MAX"))"$'\n'
   elif echo "$ni_block" | grep -q 'no delta'; then
     lines="${lines}✅ ingest (델타 없음 — 변경 사항 없음)"$'\n'
   else
