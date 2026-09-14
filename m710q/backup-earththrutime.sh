@@ -5,8 +5,10 @@
 # 이 프로젝트의 자료는 DB 가 아니라 파일이다. 운영 서버(dolfinid)의 DB 에는 관리자 계정과
 # 세션뿐이고, 지질 자료는 개발 호스트(여기) 의 data/ 에서 만들어 배포 묶음으로 올라간다.
 # 그래서 지킬 것은 두 가지다.
-#   1. 여기 data/sources (원본 아카이브 3.6 GB, 다시 받을 수는 있다) 와 data/derived
-#      (파생 자료, 다시 만드는 데 한 시간) → NAS 에 미러.
+#   1. 여기 data/sources (원본 아카이브 3.6 GB, 불변) → NAS 에 미러.
+#      data/derived (파생 자료, 다시 만드는 데 한 시간) → 날짜별/주별/월별 스냅샷
+#      (rsync --link-dest 로 안 바뀐 파일은 inode 공유; backup-fsis.sh 의 uploads 스냅과 같은 방식).
+#      일간 14일, 주간(월요일) 12주, 월간(1일) 12개월 + 12월분 영구. 로컬에 만들고 NAS 로 -aH 미러.
 #   2. dolfinid 의 검증된 DB 스냅샷(backups/db-*.sqlite3, 매시 online-backup) 과
 #      .env.django(비밀키·접근 키) → 로컬 + NAS, 날짜별 보관.
 # backup-fcmanager.sh 의 구조를 따르되 테스트 컨테이너 갱신은 없다.
@@ -29,6 +31,10 @@ LOG_FILE="${BACKUP_DIR}/backup.log"
 
 LOCAL_DAILY_DAYS=30
 NAS_DAILY_DAYS=90
+DERIVED_SNAP_DIR="${BACKUP_DIR}/derived_snapshots"
+DERIVED_DAILY_KEEP=14      # 일
+DERIVED_WEEKLY_KEEP=84     # 일 (12주)
+DERIVED_MONTHLY_KEEP=12    # 개월 (12월분은 영구)
 
 mkdir -p "${DB_HISTORY_DIR}" "${CURRENT_DIR}"
 
@@ -60,6 +66,36 @@ cleanup_tiered() {
         ((deleted++)) || true
     done < <(find "$dir" -name "$pattern" -mtime +${daily_days} 2>/dev/null)
     echo $deleted
+}
+
+# 파생 자료 스냅샷: 가장 최근 스냅샷(어느 층이든)을 --link-dest 로 걸어 바뀐 파일만 새로 쓴다.
+latest_snapshot() {
+    find "${DERIVED_SNAP_DIR}"/{daily,weekly,monthly} -maxdepth 1 -mindepth 1 -type d 2>/dev/null \
+        | xargs -r stat -c '%Y %n' | sort -n | tail -1 | cut -d' ' -f2-
+}
+take_snapshot() {   # take_snapshot <tier> <name>
+    local dest="${DERIVED_SNAP_DIR}/$1/$2"
+    [ -d "$dest" ] && { log "derived $1/$2 이미 있음 (skip)"; return; }
+    local base; base=$(latest_snapshot)
+    if [ -n "$base" ]; then
+        rsync -a --delete --link-dest="${base}/" "${PROJECT_DIR}/data/derived/" "${dest}/" >> "${LOG_FILE}" 2>&1
+        log "derived $1/$2 스냅샷 (link-dest=${base##*/})"
+    else
+        rsync -a --delete "${PROJECT_DIR}/data/derived/" "${dest}/" >> "${LOG_FILE}" 2>&1
+        log "derived $1/$2 스냅샷 (최초)"
+    fi
+    # rsync -a 는 디렉터리 mtime 을 원본 것으로 맞추므로, 찍은 날짜는 표식 파일이 기억한다.
+    touch "${dest}/.snapshot-taken"
+}
+# 오래된 스냅샷 정리(표식 파일의 나이 기준). 월간은 12월분을 남긴다.
+prune_snapshots() {   # prune_snapshots <tier> <days>
+    local dir="${DERIVED_SNAP_DIR}/$1" deleted=0
+    while IFS= read -r marker; do
+        local snap; snap=$(dirname "$marker")
+        [ "$1" = monthly ] && [ "$(basename "$snap" | cut -c5-6)" = "12" ] && continue
+        rm -rf "$snap"; ((deleted++)) || true
+    done < <(find "$dir" -mindepth 2 -maxdepth 2 -name .snapshot-taken -mtime +"$2" 2>/dev/null)
+    [ "$deleted" -gt 0 ] && log "derived $1 정리: ${deleted}개 삭제" || true
 }
 
 log "========== 백업 시작 =========="
@@ -105,17 +141,33 @@ if timeout 10 test -d "$(dirname "${NAS_DIR}")"; then
     NDEL=$(cleanup_tiered "${NAS_DIR}/db_history" "db_*.sqlite3" "db_" "sqlite3" ${NAS_DAILY_DAYS})
     [ "${NDEL}" -gt 0 ] && log "NAS DB 정리: ${NDEL}개 삭제"
 
-    # 개발 호스트의 자료를 미러한다. sources 는 발행처 아카이브(불변), derived 는 스크립트 산출물.
-    # --delete 로 여기와 같게 둔다: 여기서 지운 파생 자료는 NAS 에서도 사라진다 (미러이지 이력이
-    # 아니다 — 이력이 필요한 것은 git 에 있는 sources/·annotations/ 매니페스트다).
-    for track in sources derived; do
-        if [ -d "${PROJECT_DIR}/data/${track}" ]; then
-            rsync -a --no-group --delete "${PROJECT_DIR}/data/${track}/" "${NAS_DIR}/data/${track}/" >> "${LOG_FILE}" 2>&1
-            log "NAS data/${track} 미러 완료 ($(du -sh "${PROJECT_DIR}/data/${track}" | cut -f1))"
-        else
-            log "WARN: ${PROJECT_DIR}/data/${track} 없음"
-        fi
-    done
+    # 원본 아카이브는 불변이라 미러 하나면 된다. --delete 로 여기와 같게 둔다.
+    if [ -d "${PROJECT_DIR}/data/sources" ]; then
+        rsync -a --no-group --delete "${PROJECT_DIR}/data/sources/" "${NAS_DIR}/data/sources/" >> "${LOG_FILE}" 2>&1
+        log "NAS data/sources 미러 완료 ($(du -sh "${PROJECT_DIR}/data/sources" | cut -f1))"
+    else
+        log "WARN: ${PROJECT_DIR}/data/sources 없음"
+    fi
+    # 파생 자료는 이력이 있어야 한다: 재생성이 잘못됐거나 스크립트가 바뀐 뒤 이전 결과가 필요할 때.
+    if [ -d "${PROJECT_DIR}/data/derived" ]; then
+        mkdir -p "${DERIVED_SNAP_DIR}"/{daily,weekly,monthly}
+        take_snapshot daily "${TODAY}"
+        [ "$(date +%u)" = 1 ] && take_snapshot weekly "$(date +%G-W%V)"
+        [ "$(date +%d)" = 01 ] && take_snapshot monthly "$(date +%Y%m)"
+        # 층이 비어 있으면(첫 실행) 주간·월간도 한 장씩 만들어 둔다.
+        [ -n "$(ls -A "${DERIVED_SNAP_DIR}/weekly")" ] || take_snapshot weekly "$(date +%G-W%V)"
+        [ -n "$(ls -A "${DERIVED_SNAP_DIR}/monthly")" ] || take_snapshot monthly "$(date +%Y%m)"
+        prune_snapshots daily "${DERIVED_DAILY_KEEP}"
+        prune_snapshots weekly "${DERIVED_WEEKLY_KEEP}"
+        prune_snapshots monthly "$((DERIVED_MONTHLY_KEEP * 31))"
+        # NAS 로 하드링크 구조를 보존해 미러 (-H). 로컬에서 지운 스냅샷은 NAS 에서도 지워진다.
+        rsync -aH --no-group --delete "${DERIVED_SNAP_DIR}/" "${NAS_DIR}/derived_snapshots/" >> "${LOG_FILE}" 2>&1
+        log "NAS derived 스냅샷 미러 완료 (일 $(ls "${DERIVED_SNAP_DIR}/daily" | wc -l)·주 $(ls "${DERIVED_SNAP_DIR}/weekly" | wc -l)·월 $(ls "${DERIVED_SNAP_DIR}/monthly" | wc -l), $(du -sh "${DERIVED_SNAP_DIR}" | cut -f1))"
+        # 종전의 단순 미러는 스냅샷으로 대체됐다.
+        rm -rf "${NAS_DIR}/data/derived"
+    else
+        log "WARN: ${PROJECT_DIR}/data/derived 없음"
+    fi
     # 최신 릴리스 묶음 하나: 개발 호스트 없이도 서버에 다시 올릴 수 있게.
     LATEST_SUMS=$(ls -1t "${PROJECT_DIR}"/dist/SHA256SUMS-v* 2>/dev/null | head -1 || true)
     if [ -n "${LATEST_SUMS}" ]; then

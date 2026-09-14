@@ -24,7 +24,7 @@ system-operation/
 | `backup-fsis.sh`     | `5 3 * * *` | fsis2026 백업 (운영서버 online-backup pull → 로컬 + NAS + 테스트 컨테이너 갱신) |
 | `backup-ghdb.sh`     | `30 3 * * *` | GHDB 백업 |
 | `backup-fcmanager.sh`| `0 5 * * *` | fcmanager 백업 |
-| `backup-earththrutime.sh` | `20 4 * * *` | EarthThruTime3D 백업 (dolfinid DB 스냅샷·.env pull + 개발 호스트 data/ 를 NAS 에 미러 + 최신 릴리스 묶음) |
+| `backup-earththrutime.sh` | `20 4 * * *` | EarthThruTime3D 백업 (dolfinid DB 스냅샷·.env pull + 개발 호스트 data/sources NAS 미러 + data/derived 일·주·월 스냅샷 + 최신 릴리스 묶음) |
 | `pull-repos.sh`      | `0 6 * * *` | `~/projects` 밑 모든 git repo 를 `--ff-only` pull |
 | `morning-summary.sh` | `30 7 * * *` | 새벽 작업 결과를 점검해 텔레그램 요약 1통 발송 |
 | `notify-telegram.sh` | (헬퍼) | 공용 텔레그램 전송기. 다른 스크립트가 호출 |

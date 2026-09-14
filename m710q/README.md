@@ -43,7 +43,7 @@ git add m710q/<파일> && git commit && git push
 | `backup-fsis.sh` | fsis2026 (kofhin) 백업 pull → 로컬 + NAS + dev_data + 테스트 컨테이너 |
 | `backup-ghdb.sh` | ghdb (dolfinid) 백업 pull. 위와 같은 구조 |
 | `backup-fcmanager.sh` | fcmanager 백업 pull |
-| `backup-earththrutime.sh` | EarthThruTime3D: dolfinid DB·.env pull + 여기 `data/` 를 NAS 미러. 자료가 DB 가 아니라 파일이라 방향이 반대다(개발 호스트 → NAS) |
+| `backup-earththrutime.sh` | EarthThruTime3D: dolfinid DB·.env pull + 여기 `data/sources` NAS 미러 + `data/derived` 일(14)·주(12)·월(12+12월 영구) link-dest 스냅샷. 자료가 DB 가 아니라 파일이라 방향이 반대다(개발 호스트 → NAS) |
 | `lib/refresh-test-db.sh` | 테스트 컨테이너 DB·uploads 갱신 헬퍼. 위 백업 스크립트들이 `source` |
 | `pull-repos.sh` | `~/projects` 밑 git repo 전체 `--ff-only` pull |
 | `morning-summary.sh` | 새벽 작업 결과 점검 → 텔레그램 요약 1통 |
