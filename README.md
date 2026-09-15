@@ -21,6 +21,7 @@ system-operation/
 
 | 파일 | cron | 설명 |
 |------|------|------|
+| `backup-hanyang3d.py` | `15 5 * * *` | 한양3D 검증된 콘텐츠 DB·설정 pull → 로컬 30일·NAS 90일 + 월초 보존 (상태 파일·로그, 외부 알림 없음) |
 | `backup-fsis.sh`     | `5 3 * * *` | fsis2026 백업 (운영서버 online-backup pull → 로컬 + NAS + 테스트 컨테이너 갱신) |
 | `backup-ghdb.sh`     | `30 3 * * *` | GHDB 백업 |
 | `backup-fcmanager.sh`| `0 5 * * *` | fcmanager 백업 |
