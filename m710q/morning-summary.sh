@@ -51,6 +51,7 @@ check_backup "dolfin DB"  "/srv/dolfinserver/logs/backup.log"
 check_backup "fsis2026"   "/home/jikhanjung/backups/fsis2026/backup.log"
 check_backup "ghdb"       "/home/jikhanjung/backups/ghdb/backup.log"
 check_backup "fcmanager"  "/home/jikhanjung/backups/fcmanager/backup.log"
+check_backup "scoremate"  "/home/jikhanjung/backups/scoremate/backup.log"
 check_backup "cdGTS sync" "/home/jikhanjung/backups/cdGTS/sync.log"
 
 # git pull(pull-repos): 로그의 마지막 실행 블록이 오늘이고 [FAIL]이 없으면 성공
