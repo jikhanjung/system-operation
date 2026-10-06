@@ -24,7 +24,7 @@
 0 1 * * * python3 /srv/dolfinserver/scripts/backup_db.py >> /srv/dolfinserver/logs/backup.log 2>&1
 5 3 * * * /home/jikhanjung/scripts/backup-fsis.sh
 # 네이버 부동산 토지 매물 크롤링 (매주 월요일 02:00)
-0 2 * * * /srv/naverland/run-crawler.sh >> /tmp/naver_crawler.log 2>&1
+# 2026-10-06 중지(사용자 결정) — 재개 시 주석 해제: 0 2 * * * /srv/naverland/run-crawler.sh >> /tmp/naver_crawler.log 2>&1
 30 3 * * * /home/jikhanjung/scripts/backup-ghdb.sh
 0 5 * * * /home/jikhanjung/scripts/backup-fcmanager.sh
 # ~/projects 밑 모든 git repo 매일 06:00 pull (--ff-only)

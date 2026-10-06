@@ -152,9 +152,13 @@ if [ -f "$DEVDOCS_PENDING" ]; then
 fi
 
 # naverland 크롤러: run-crawler.sh(02:00)가 남긴 상태 파일(오늘·SUCCESS 확인)
+# 2026-10-06 사용자 결정으로 크롤러 당분간 중지(crontab 02:00 줄 주석 처리) → 점검도 끔.
+# 재개할 때: crontab 줄 주석 해제 + CHECK_NAVERLAND 기본값을 1 로.
 NL_STATUS="/srv/naverland/logs/crawler_status.txt"
 nl_line=$(head -1 "$NL_STATUS" 2>/dev/null)
-if echo "$nl_line" | grep -q "^${TODAY}"; then
+if [ "${CHECK_NAVERLAND:-0}" != 1 ]; then
+  :
+elif echo "$nl_line" | grep -q "^${TODAY}"; then
   if echo "$nl_line" | grep -q "SUCCESS"; then
     lines="${lines}✅ naverland 크롤러 (${nl_line#*| })"$'\n'
   else
