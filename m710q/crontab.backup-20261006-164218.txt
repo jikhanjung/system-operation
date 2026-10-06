@@ -37,7 +37,7 @@
 0 4 * * * /home/jikhanjung/projects/cdGTS/scripts/sync-cdgts-db.sh >> /home/jikhanjung/backups/cdGTS/cron.log 2>&1
 0 * * * * python3 /srv/paleonews/scripts/backup_db.py >> /srv/paleonews/logs/backup.log 2>&1
 # naverland hourly DB 백업 (배포·데이터 계약 안전망)
-0 * * * * python3 /srv/naverland/scripts/backup_db.py >> /srv/naverland/logs/backup.log 2>&1
+# 2026-10-06 중지(사용자 결정, 크롤러와 함께) — 재개 시 주석 해제: 0 * * * * python3 /srv/naverland/scripts/backup_db.py >> /srv/naverland/logs/backup.log 2>&1
 # dolfinserver2 — fin.db 시간별 백업 (.guides/web/data-safety.md).
 # **사람의 판정이라 다시 만들 수 없다.** :00 이 아니라 :10 인 것은 paleonews·
 # naverland 백업이 정각에 몰려 NFS 를 함께 두드리지 않게 하려는 것이다.
