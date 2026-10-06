@@ -102,11 +102,22 @@ log "========== 백업 시작 =========="
 TODAY=$(date +%Y%m%d)
 
 # --- 1. dolfinid DB 스냅샷 (검증된 online-backup 최신본; 라이브 DB 는 긁지 않는다) ---
-if ! LATEST_DB=$(ssh -q -o BatchMode=yes -o ConnectTimeout=15 "${REMOTE}" \
-        "ls -1t ${REMOTE_PATH}/backups/db-*.sqlite3 2>/dev/null | head -1"); then
+if ! SNAP_INFO=$(ssh -q -o BatchMode=yes -o ConnectTimeout=15 "${REMOTE}" \
+        "f=\$(ls -1t ${REMOTE_PATH}/backups/db-*.sqlite3 2>/dev/null | head -1); \
+         [ -n \"\$f\" ] && echo \"\$f \$(( ( \$(date +%s) - \$(stat -c %Y \"\$f\") ) / 60 ))\" || true"); then
     log "ERROR: dolfinid ssh 접속 실패 (${REMOTE})"
     exit 1
 fi
+LATEST_DB=${SNAP_INFO%% *}
+SNAP_AGE_MIN=${SNAP_INFO##* }
+# 신선도 게이트 (guides/web/data-safety — 소비자 쪽에서도 MUST, backup-scoremate.sh 와 같은 규칙):
+# 운영 backup.sh 는 hourly timer 로 돈다. 최신 스냅샷이 2시간 넘게 낡았다 = timer 중단, 또는
+# 무결성 검사가 채택을 막는 중(운영 DB 손상 신호). 낡은 걸 조용히 가져오면 그 신호가 묻힌다.
+if [ -n "${LATEST_DB}" ] && [ "${SNAP_AGE_MIN}" -gt 120 ]; then
+    log "ERROR: 운영 최신 스냅샷이 ${SNAP_AGE_MIN}분 전 것(>2h). hourly 중단 또는 무결성 검사가 채택 차단 중 — ${REMOTE}:${REMOTE_PATH}/backups/ 와 journalctl 확인"
+    exit 1
+fi
+[ -n "${LATEST_DB}" ] && log "최신 스냅샷: ${LATEST_DB##*/} (${SNAP_AGE_MIN}분 전)"
 DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
 if [ -n "${LATEST_DB}" ] && scp -q "${REMOTE}:${LATEST_DB}" "${DB_SNAPSHOT}"; then
     if sqlite3 "${DB_SNAPSHOT}" "PRAGMA integrity_check;" 2>/dev/null | grep -qx ok; then

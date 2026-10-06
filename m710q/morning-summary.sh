@@ -53,6 +53,31 @@ check_backup "ghdb"       "/home/jikhanjung/backups/ghdb/backup.log"
 check_backup "fcmanager"  "/home/jikhanjung/backups/fcmanager/backup.log"
 check_backup "scoremate"  "/home/jikhanjung/backups/scoremate/backup.log"
 check_backup "cdGTS sync" "/home/jikhanjung/backups/cdGTS/sync.log"
+check_backup "earththrutime3d" "/home/jikhanjung/backups/earththrutime3d/backup.log"
+
+# backup-hanyang3d.py 는 로그 대신 status.json 을 남긴다 ({"status": "ok", "time": UTC ISO}).
+# 시각이 UTC 라 날짜 문자열 비교 대신 "26시간 안에 ok" 로 판정한다.
+check_status_json() {
+  local name="$1" f="$2" verdict
+  verdict=$(python3 - "$f" <<'PY' 2>/dev/null
+import json, sys
+from datetime import datetime, timezone
+try:
+    d = json.load(open(sys.argv[1]))
+    age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(d["time"])).total_seconds() / 3600
+    print("ok" if d.get("status") == "ok" and age_h <= 26 else f"{d.get('status')} {age_h:.0f}h")
+except Exception as e:
+    print(f"읽기 실패: {e.__class__.__name__}")
+PY
+)
+  if [ "$verdict" = "ok" ]; then
+    lines="${lines}✅ ${name}"$'\n'
+  else
+    lines="${lines}❌ ${name} (${verdict:-상태 파일 없음})"$'\n'
+    ok_all=0
+  fi
+}
+check_status_json "hanyang3d" "/home/jikhanjung/backups/hanyang3d/status.json"
 
 # git pull(pull-repos): 로그의 마지막 실행 블록이 오늘이고 [FAIL]이 없으면 성공
 PULL_LOG="/home/jikhanjung/scripts/pull-repos.log"
