@@ -1,16 +1,16 @@
 #!/bin/bash
 # =============================================================================
-# ScoreMate 백업 스크립트 (m710q 개발/백업 호스트에서 실행)
-# 운영서버(dolfinid /srv/scoremate)에서 검증된 DB 스냅샷 · 악보 파일(files/) · .env 를 SSH pull 하여 보관.
+# Notavela 백업 스크립트 (m710q 개발/백업 호스트에서 실행)
+# 운영서버(dolfinid /srv/notavela)에서 검증된 DB 스냅샷 · 악보 파일(files/) · .env 를 SSH pull 하여 보관.
 # backup-fcmanager.sh 를 그대로 옮겼다(단일 DB + 파일 디렉터리). 차이: media/ → files/, 테스트 타깃 없음.
 #
-# 실행본 = ~/scripts/backup-scoremate.sh (~/scripts 는 이 디렉터리의 심볼릭 링크 — 사본 불일치 없음).
-# cron 등록(m710q): 25 5 * * * /home/jikhanjung/scripts/backup-scoremate.sh
-# 수동 전체 스냅:    /home/jikhanjung/scripts/backup-scoremate.sh --full-snapshot
+# 실행본 = ~/scripts/backup-notavela.sh (~/scripts 는 이 디렉터리의 심볼릭 링크 — 사본 불일치 없음).
+# cron 등록(m710q): 25 5 * * * /home/jikhanjung/scripts/backup-notavela.sh
+# 수동 전체 스냅:    /home/jikhanjung/scripts/backup-notavela.sh --full-snapshot
 #
 # 운영서버 접속은 환경변수로 override 가능:
-#   SCOREMATE_REMOTE_USER, SCOREMATE_REMOTE_HOST, SCOREMATE_REMOTE_PATH
-# 배포 · 백업 계약: ScoreMateServer deploy/README.md §백업, devdocs guides/web/data-safety.md
+#   NOTAVELA_REMOTE_USER, NOTAVELA_REMOTE_HOST, NOTAVELA_REMOTE_PATH
+# 배포 · 백업 계약: NotavelaServer deploy/README.md §백업, devdocs guides/web/data-safety.md
 # =============================================================================
 
 set -euo pipefail
@@ -21,15 +21,15 @@ if [ "${1:-}" = "--full-snapshot" ]; then
 fi
 
 # --- 설정 ---
-REMOTE_USER="${SCOREMATE_REMOTE_USER:-honestjung}"
-REMOTE_HOST="${SCOREMATE_REMOTE_HOST:-34.64.158.160}"   # dolfinid
-REMOTE_PATH="${SCOREMATE_REMOTE_PATH:-/srv/scoremate}"
-# .env 는 운영 런타임 위치(/srv/scoremate/.env). 배포 분리 후 compose 도 여기서 실행.
-REMOTE_ENV_PATH="${SCOREMATE_REMOTE_ENV:-/srv/scoremate/.env}"
+REMOTE_USER="${NOTAVELA_REMOTE_USER:-honestjung}"
+REMOTE_HOST="${NOTAVELA_REMOTE_HOST:-34.64.158.160}"   # dolfinid
+REMOTE_PATH="${NOTAVELA_REMOTE_PATH:-/srv/notavela}"
+# .env 는 운영 런타임 위치(/srv/notavela/.env). 배포 분리 후 compose 도 여기서 실행.
+REMOTE_ENV_PATH="${NOTAVELA_REMOTE_ENV:-/srv/notavela/.env}"
 REMOTE="${REMOTE_USER}@${REMOTE_HOST}"
 
-BACKUP_DIR="/home/jikhanjung/backups/scoremate"
-NAS_DIR="/nas/JikhanJung/scoremate_backup"
+BACKUP_DIR="/home/jikhanjung/backups/notavela"
+NAS_DIR="/nas/JikhanJung/notavela_backup"
 DB_HISTORY_DIR="${BACKUP_DIR}/db_history"
 TAR_HISTORY_DIR="${BACKUP_DIR}/tar_history"
 CURRENT_DIR="${BACKUP_DIR}/current"
@@ -82,10 +82,10 @@ TODAY=$(date +%Y%m%d)
 # 뜨고 PRAGMA integrity_check 까지 통과시킨 **일관된 단일 파일**을 가져온다(계약 §백업 레인).
 DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
 log "운영 hourly 스냅샷 조회 중..."
-SNAP_INFO=$(ssh "${REMOTE}" "f=\$(ls -t ${REMOTE_PATH}/backup/scoremate_*.sqlite3 2>/dev/null | head -1); \
+SNAP_INFO=$(ssh "${REMOTE}" "f=\$(ls -t ${REMOTE_PATH}/backup/notavela_*.sqlite3 2>/dev/null | head -1); \
     [ -n \"\$f\" ] && echo \"\$f \$(( ( \$(date +%s) - \$(stat -c %Y \"\$f\") ) / 60 ))\"" 2>/dev/null || true)
 if [ -z "${SNAP_INFO}" ]; then
-    log "ERROR: 운영 hourly 스냅샷 없음 (${REMOTE_PATH}/backup/scoremate_*.sqlite3) — backup_db.py cron 확인"
+    log "ERROR: 운영 hourly 스냅샷 없음 (${REMOTE_PATH}/backup/notavela_*.sqlite3) — backup_db.py cron 확인"
     exit 1
 fi
 REMOTE_SNAP=${SNAP_INFO%% *}
@@ -159,8 +159,8 @@ rsync -az --delete "${REMOTE}:${REMOTE_PATH}/files/" "${CURRENT_DIR}/files/" >> 
 log "files/ 동기화 완료"
 
 # --- 3. .env 백업 ---
-# .env 는 운영 런타임 위치 /srv/scoremate/.env 에 있다
-# (호스트가 직접 관리, sync 대상 아님). SCOREMATE_REMOTE_ENV 로 override.
+# .env 는 운영 런타임 위치 /srv/notavela/.env 에 있다
+# (호스트가 직접 관리, sync 대상 아님). NOTAVELA_REMOTE_ENV 로 override.
 scp -q "${REMOTE}:${REMOTE_ENV_PATH}" "${CURRENT_DIR}/.env" 2>/dev/null && \
     log ".env 복사 완료" || log "WARN: .env 없음 (건너뜀: ${REMOTE_ENV_PATH})"
 
