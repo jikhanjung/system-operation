@@ -82,7 +82,8 @@ TODAY=$(date +%Y%m%d)
 # 뜨고 PRAGMA integrity_check 까지 통과시킨 **일관된 단일 파일**을 가져온다(계약 §백업 레인).
 DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.sqlite3"
 log "운영 hourly 스냅샷 조회 중..."
-SNAP_INFO=$(ssh "${REMOTE}" "f=\$(ls -t ${REMOTE_PATH}/backup/notavela_*.sqlite3 2>/dev/null | head -1); \
+# Postgres 로 옮긴 뒤(Notavela P08)에는 hourly 가 pg_dump(-Fc) 의 notavela_*.dump 를 남긴다 — 둘 중 가장 새것
+SNAP_INFO=$(ssh "${REMOTE}" "f=\$(ls -t ${REMOTE_PATH}/backup/notavela_*.sqlite3 ${REMOTE_PATH}/backup/notavela_*.dump 2>/dev/null | head -1); \
     [ -n \"\$f\" ] && echo \"\$f \$(( ( \$(date +%s) - \$(stat -c %Y \"\$f\") ) / 60 ))\"" 2>/dev/null || true)
 if [ -z "${SNAP_INFO}" ]; then
     log "ERROR: 운영 hourly 스냅샷 없음 (${REMOTE_PATH}/backup/notavela_*.sqlite3) — backup_db.py cron 확인"
@@ -98,6 +99,45 @@ if [ "${SNAP_AGE_MIN}" -gt 120 ]; then
     exit 1
 fi
 log "최신 스냅샷: $(basename "${REMOTE_SNAP}") (${SNAP_AGE_MIN}분 전)"
+
+if [[ "${REMOTE_SNAP}" == *.dump ]]; then
+# --- 1'. Postgres 덤프 (Notavela P08): 받기 → 임시 Postgres 에 복원 연습(data-safety §11) → 채택 ---
+# 복원 연습이 곧 검증이다: pg_restore 가 끝까지 되고, 핵심 표에 행이 있고, 세션 표가 비어 있어야(반출 위생 — 운영
+# backup_db.py 가 --exclude-table-data=django_session 으로 뜬다. 여기서 소비자로서 한 번 더 확인) 채택한다.
+DB_EXT=dump
+DB_SNAPSHOT="${DB_HISTORY_DIR}/db_${TODAY}.dump"
+if ! scp -q "${REMOTE}:${REMOTE_SNAP}" "${DB_SNAPSHOT}.tmp"; then
+    rm -f "${DB_SNAPSHOT}.tmp"
+    log "ERROR: DB 덤프 pull 실패 (${REMOTE}:${REMOTE_SNAP})"
+    exit 1
+fi
+DRILL="notavela-restore-drill-$$"
+DRILL_OUT=$( {
+    docker run -d --rm --name "${DRILL}" -e POSTGRES_PASSWORD=drill -e POSTGRES_USER=notavela -e POSTGRES_DB=notavela postgres:17-alpine >/dev/null
+    for i in $(seq 1 60); do docker exec "${DRILL}" pg_isready -U notavela -d notavela >/dev/null 2>&1 && break; sleep 1; done
+    sleep 2
+    docker exec -i "${DRILL}" pg_restore -U notavela -d notavela --no-owner --exit-on-error < "${DB_SNAPSHOT}.tmp" >/dev/null
+    docker exec "${DRILL}" psql -U notavela -d notavela -Atc "select (select count(*) from scores)||'|'||(select count(*) from users)||'|'||(select count(*) from django_session)"
+} 2>&1 ) || DRILL_OUT="복원 실패: ${DRILL_OUT}"
+docker rm -f "${DRILL}" >/dev/null 2>&1 || true
+LAST_LINE=${DRILL_OUT##*$'\n'}
+IFS='|' read -r DRILL_SCORES DRILL_USERS DRILL_SESSIONS <<< "${LAST_LINE}"
+if ! [[ "${DRILL_SCORES:-}" =~ ^[0-9]+$ && "${DRILL_USERS:-}" =~ ^[0-9]+$ ]] || [ "${DRILL_SCORES}" -eq 0 ] || [ "${DRILL_USERS}" -eq 0 ]; then
+    rm -f "${DB_SNAPSHOT}.tmp"
+    log "ERROR: 덤프 복원 연습 실패 (${LAST_LINE}) — 미채택, 과거 덤프 보존"
+    exit 1
+fi
+if [ "${DRILL_SESSIONS:-1}" != "0" ]; then
+    rm -f "${DB_SNAPSHOT}.tmp"
+    log "ERROR: 덤프에 세션 ${DRILL_SESSIONS}행 — 반출 위생 위반, 미채택(운영 backup_db.py 확인)"
+    exit 1
+fi
+mv -f "${DB_SNAPSHOT}.tmp" "${DB_SNAPSHOT}"
+log "DB 덤프 완료: ${DB_SNAPSHOT} (복원 연습 ok: 악보 ${DRILL_SCORES} · 사용자 ${DRILL_USERS}, 세션 0)"
+DELETED=$(cleanup_tiered "${DB_HISTORY_DIR}" "db_*.dump" "db_" "dump" ${LOCAL_DAILY_DAYS})
+[ "${DELETED}" -gt 0 ] && log "로컬 DB 정리: ${DELETED}개 삭제 (${LOCAL_DAILY_DAYS}일 초과, 월초/연말 보존)"
+else
+DB_EXT=sqlite3
 if ! scp -q "${REMOTE}:${REMOTE_SNAP}" "${DB_SNAPSHOT}.tmp"; then
     rm -f "${DB_SNAPSHOT}.tmp"
     log "ERROR: DB 스냅샷 pull 실패 (${REMOTE}:${REMOTE_SNAP})"
@@ -152,6 +192,7 @@ log "DB 스냅샷 완료: ${DB_SNAPSHOT} (integrity ok, 단일 파일, 반출 �
 
 DELETED=$(cleanup_tiered "${DB_HISTORY_DIR}" "db_*.sqlite3" "db_" "sqlite3" ${LOCAL_DAILY_DAYS})
 [ "${DELETED}" -gt 0 ] && log "로컬 DB 정리: ${DELETED}개 삭제 (${LOCAL_DAILY_DAYS}일 초과, 월초/연말 보존)"
+fi
 
 # --- 2. files/ 미러링 (악보 PDF · 썸네일 — 한 번 쓰면 바뀌지 않는다) ---
 log "files/ 동기화 중..."
@@ -176,24 +217,24 @@ else
 fi
 
 # --- 5. 현재 DB도 current/에 동기화 ---
-cp "${DB_SNAPSHOT}" "${CURRENT_DIR}/db.sqlite3"
+cp "${DB_SNAPSHOT}" "${CURRENT_DIR}/db.${DB_EXT}"
 # 스냅샷은 단일 파일 — 종전(라이브 scp) 실행이 남긴 형제 파일을 반드시 치운다. 남기면 새 본체 옆에
 # 낡은 -wal 이 붙은 상태가 된다.
 rm -f "${CURRENT_DIR}/db.sqlite3-wal" "${CURRENT_DIR}/db.sqlite3-shm"
-log "current/db.sqlite3 동기화 완료 (단일 파일)"
+log "current/db.${DB_EXT} 동기화 완료 (단일 파일)"
 
 # --- 6. NAS 백업 (마운트돼 있을 때만) ---
 if timeout 10 test -d "${NAS_DIR}"; then
     NAS_DB_DIR="${NAS_DIR}/db_history"
     NAS_CURRENT="${NAS_DIR}/current"
     mkdir -p "${NAS_DB_DIR}" "${NAS_CURRENT}"
-    cp "${DB_SNAPSHOT}" "${NAS_DB_DIR}/db_${TODAY}.sqlite3"
+    cp "${DB_SNAPSHOT}" "${NAS_DB_DIR}/db_${TODAY}.${DB_EXT}"
     rm -f "${NAS_DB_DIR}/db_${TODAY}.sqlite3-wal" "${NAS_DB_DIR}/db_${TODAY}.sqlite3-shm" \
           "${NAS_CURRENT}/db.sqlite3-wal" "${NAS_CURRENT}/db.sqlite3-shm"   # 단일 파일 — 잔재 제거
     rsync -az --no-group --delete "${CURRENT_DIR}/files/" "${NAS_CURRENT}/files/" >> "${LOG_FILE}" 2>&1
     [ -f "${CURRENT_DIR}/.env" ] && cp "${CURRENT_DIR}/.env" "${NAS_CURRENT}/.env"
-    cp "${DB_SNAPSHOT}" "${NAS_CURRENT}/db.sqlite3"
-    NAS_DEL=$(cleanup_tiered "${NAS_DB_DIR}" "db_*.sqlite3" "db_" "sqlite3" ${NAS_DAILY_DAYS})
+    cp "${DB_SNAPSHOT}" "${NAS_CURRENT}/db.${DB_EXT}"
+    NAS_DEL=$(cleanup_tiered "${NAS_DB_DIR}" "db_*.${DB_EXT}" "db_" "${DB_EXT}" ${NAS_DAILY_DAYS})
     [ "${NAS_DEL}" -gt 0 ] && log "NAS DB 정리: ${NAS_DEL}개 삭제"
     log "NAS 백업 완료"
 else
