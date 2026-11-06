@@ -195,9 +195,31 @@ DELETED=$(cleanup_tiered "${DB_HISTORY_DIR}" "db_*.sqlite3" "db_" "sqlite3" ${LO
 fi
 
 # --- 2. files/ 미러링 (악보 PDF · 썸네일 — 한 번 쓰면 바뀌지 않는다) ---
-log "files/ 동기화 중..."
-rsync -az --delete "${REMOTE}:${REMOTE_PATH}/files/" "${CURRENT_DIR}/files/" >> "${LOG_FILE}" 2>&1
-log "files/ 동기화 완료"
+# 운영 파일 저장소가 R2 면(P08 2단계, 운영 .env STORAGE_BACKEND=s3) 디스크 files/ 는 전환 때 멈춘 사본 — R2 버킷에서 당긴다.
+# 키는 R2_ENV(읽기 전용 토큰, 이 버킷만 — 쓰기 키를 m710q 에 두지 않는다): STORAGE_ENDPOINT · STORAGE_BUCKET · STORAGE_ACCESS_KEY · STORAGE_SECRET_KEY
+R2_ENV="${NOTAVELA_R2_ENV:-/home/jikhanjung/.config/notavela/r2-read.env}"
+RCLONE="${RCLONE:-/home/jikhanjung/.local/bin/rclone}"
+if ssh "${REMOTE}" "grep -qE '^STORAGE_BACKEND=s3' ${REMOTE_ENV_PATH}" 2>/dev/null; then
+    if [ -r "${R2_ENV}" ] && [ -x "${RCLONE}" ]; then
+        log "files/ 동기화 중 (R2)..."
+        if ( set -a; . "${R2_ENV}"; set +a
+             RCLONE_CONFIG=/dev/null RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Cloudflare RCLONE_CONFIG_R2_REGION=auto \
+             RCLONE_CONFIG_R2_ENDPOINT="${STORAGE_ENDPOINT}" RCLONE_CONFIG_R2_ACCESS_KEY_ID="${STORAGE_ACCESS_KEY}" \
+             RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${STORAGE_SECRET_KEY}" RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true \
+             "${RCLONE}" sync "r2:${STORAGE_BUCKET}" "${CURRENT_DIR}/files/" --exclude "_r2test/**" --exclude "_deploy_probe/**" \
+                 --transfers 8 --log-level NOTICE ) >> "${LOG_FILE}" 2>&1; then
+            log "files/ 동기화 완료 (R2)"
+        else
+            log "ERROR: files/ R2 동기화 실패 — ${R2_ENV} 의 키 · 토큰 만료 확인"
+        fi
+    else
+        log "ERROR: 운영 파일이 R2 인데 ${R2_ENV}(읽기 전용 키) 또는 ${RCLONE} 이 없다 — 이번 files/ 백업 건너뜀"
+    fi
+else
+    log "files/ 동기화 중..."
+    rsync -az --delete "${REMOTE}:${REMOTE_PATH}/files/" "${CURRENT_DIR}/files/" >> "${LOG_FILE}" 2>&1
+    log "files/ 동기화 완료"
+fi
 
 # --- 3. .env 백업 ---
 # .env 는 운영 런타임 위치 /srv/notavela/.env 에 있다
